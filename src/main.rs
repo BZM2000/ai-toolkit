@@ -178,6 +178,7 @@ async fn app_main() -> Result<()> {
         .route("/dashboard/glossary/update", post(update_glossary_term))
         .route("/dashboard/glossary/delete", post(delete_glossary_term))
         .merge(modules::summarizer::router())
+        .merge(modules::translatedocx::router())
         .with_state(state);
 
     let port: u16 = env::var("PORT")
@@ -593,15 +594,20 @@ async fn dashboard(
     };
 
     let models_config = state.models_config();
-    let summarizer_note = if let Some(models) = models_config.summarizer() {
-        format!(
+    let mut model_notes = String::new();
+    if let Some(models) = models_config.summarizer() {
+        model_notes.push_str(&format!(
             "<p class=\"meta-note\">Summaries use <code>{summary}</code>; translations use <code>{translation}</code>.</p>",
             summary = escape_html(models.summary_model()),
             translation = escape_html(models.translation_model())
-        )
-    } else {
-        String::new()
-    };
+        ));
+    }
+    if let Some(models) = models_config.translate_docx() {
+        model_notes.push_str(&format!(
+            "<p class=\"meta-note\">DOCX translation runs on <code>{translation}</code>.</p>",
+            translation = escape_html(models.translation_model())
+        ));
+    }
 
     let html = format!(
         r##"<!DOCTYPE html>
@@ -661,13 +667,14 @@ async fn dashboard(
             </tbody>
         </table>
         <div class="meta">
-            {summarizer_note}
+            {model_notes}
             <p>Future enhancements: add user provisioning tools, logs, and real-time LLM activity streams.</p>
         </div>
         <section class="tools">
             <h2>Available Tools</h2>
             <ul>
                 <li><a href="/tools/summarizer">Document Summarizer &amp; Translator</a></li>
+                <li><a href="/tools/translatedocx">DOCX Translator</a></li>
             </ul>
         </section>
         {admin_controls}
@@ -679,7 +686,7 @@ async fn dashboard(
         message_block = message_block,
         table_rows = table_rows,
         admin_controls = admin_controls,
-        summarizer_note = summarizer_note
+        model_notes = model_notes
     );
 
     Ok(Html(html))

@@ -13,6 +13,8 @@ pub struct ModelsConfig {
 #[serde(default)]
 pub struct ModulesConfig {
     pub summarizer: Option<SummarizerModels>,
+    #[serde(rename = "translate_docx")]
+    pub translate_docx: Option<DocxTranslatorModels>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +49,10 @@ impl ModelsConfig {
     pub fn summarizer(&self) -> Option<&SummarizerModels> {
         self.modules.summarizer.as_ref()
     }
+
+    pub fn translate_docx(&self) -> Option<&DocxTranslatorModels> {
+        self.modules.translate_docx.as_ref()
+    }
 }
 
 impl SummarizerModels {
@@ -54,6 +60,17 @@ impl SummarizerModels {
         &self.summary_model
     }
 
+    pub fn translation_model(&self) -> &str {
+        &self.translation_model
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DocxTranslatorModels {
+    pub translation_model: String,
+}
+
+impl DocxTranslatorModels {
     pub fn translation_model(&self) -> &str {
         &self.translation_model
     }
@@ -69,6 +86,8 @@ pub struct PromptsConfig {
 #[serde(default)]
 pub struct PromptModulesConfig {
     pub summarizer: Option<SummarizerPrompts>,
+    #[serde(rename = "translate_docx")]
+    pub translate_docx: Option<DocxTranslatorPrompts>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,4 +126,13 @@ impl PromptsConfig {
     pub fn summarizer(&self) -> Option<&SummarizerPrompts> {
         self.modules.summarizer.as_ref()
     }
+
+    pub fn translate_docx(&self) -> Option<&DocxTranslatorPrompts> {
+        self.modules.translate_docx.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DocxTranslatorPrompts {
+    pub translation: String,
 }
