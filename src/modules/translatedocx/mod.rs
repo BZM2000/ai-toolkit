@@ -40,6 +40,39 @@ const PARAGRAPH_SEPARATOR: &str = "[[__PARAGRAPH_BREAK__]]";
 const CHUNK_MAX_PARAGRAPHS: usize = 20;
 const CHUNK_MAX_EQUIVALENT_WORDS: f64 = 700.0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranslationDirection {
+    EnToCn,
+    CnToEn,
+}
+
+impl TranslationDirection {
+    fn as_db_value(self) -> &'static str {
+        match self {
+            TranslationDirection::EnToCn => "en_to_cn",
+            TranslationDirection::CnToEn => "cn_to_en",
+        }
+    }
+
+    fn display_label(self) -> &'static str {
+        match self {
+            TranslationDirection::EnToCn => "EN → CN",
+            TranslationDirection::CnToEn => "CN → EN",
+        }
+    }
+
+    fn from_form_value(value: &str) -> Self {
+        match value {
+            "cn_to_en" => TranslationDirection::CnToEn,
+            _ => TranslationDirection::EnToCn,
+        }
+    }
+
+    fn from_db_value(value: &str) -> Self {
+        Self::from_form_value(value)
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/tools/translatedocx", get(translatedocx_page))
@@ -114,6 +147,11 @@ async fn translatedocx_page(
                     <p class="note">Only one document can be processed per job.</p>
                     <input id="files" name="files" type="file" accept=".docx" required>
                 </div>
+                <label for="direction">Translation direction</label>
+                <select id="direction" name="direction">
+                    <option value="en_to_cn">EN → CN</option>
+                    <option value="cn_to_en">CN → EN</option>
+                </select>
                 <button type="submit">Start translation</button>
             </form>
             <div id="submission-status" class="status"></div>
@@ -178,7 +216,9 @@ async fn translatedocx_page(
                 return;
             }}
 
-            statusBox.textContent = 'Uploading documents...';
+            const directionValue = document.getElementById('direction').value;
+            const directionLabel = directionValue === 'cn_to_en' ? 'CN → EN' : 'EN → CN';
+            statusBox.textContent = `Uploading document for ${{directionLabel}} translation...`;
             const data = new FormData(form);
 
             try {{
@@ -253,12 +293,14 @@ async fn translatedocx_page(
                 docRows = '<tr><td colspan="3">No documents registered.</td></tr>';
             }}
 
+            const directionBlock = payload.translation_direction ? `<p class="note">Direction: ${{payload.translation_direction}}</p>` : '';
             const detailBlock = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
             const errorBlock = payload.error_message ? `<p class="note">${{payload.error_message}}</p>` : '';
 
             jobStatus.innerHTML = `
                 <div class="status">
                     <p><strong>Status:</strong> ${{payload.status}}</p>
+                    ${{directionBlock}}
                     ${{detailBlock}}
                     ${{errorBlock}}
                     <table>
@@ -302,6 +344,7 @@ async fn create_job(
         .map_err(|err| internal_error(err.into()))?;
 
     let mut uploaded_file: Option<UploadedFile> = None;
+    let mut direction = TranslationDirection::EnToCn;
 
     while let Some(field) = multipart
         .next_field()
@@ -312,53 +355,61 @@ async fn create_job(
             continue;
         };
 
-        if name != "files" {
-            continue;
+        match name {
+            "files" => {
+                let Some(filename) = field.file_name().map(|s| s.to_string()) else {
+                    continue;
+                };
+                if uploaded_file.is_some() {
+                    let _ = tokio_fs::remove_dir_all(&job_dir).await;
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiError::new("Only one DOCX file can be uploaded per job.")),
+                    ));
+                }
+                let safe_name = sanitize(&filename);
+                let ext = Path::new(&safe_name)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if ext != "docx" {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiError::new("Only DOCX files are supported.")),
+                    ));
+                }
+
+                let stored_path = job_dir.join(format!("source_{}", safe_name));
+
+                let mut file = tokio_fs::File::create(&stored_path)
+                    .await
+                    .map_err(|err| internal_error(err.into()))?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|err| internal_error(err.into()))?;
+                file.write_all(&bytes)
+                    .await
+                    .map_err(|err| internal_error(err.into()))?;
+                file.flush()
+                    .await
+                    .map_err(|err| internal_error(err.into()))?;
+
+                uploaded_file = Some(UploadedFile {
+                    stored_path,
+                    original_name: filename,
+                });
+            }
+            "direction" => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|err| internal_error(err.into()))?;
+                direction = TranslationDirection::from_form_value(value.trim());
+            }
+            _ => {}
         }
-
-        let Some(filename) = field.file_name().map(|s| s.to_string()) else {
-            continue;
-        };
-        if uploaded_file.is_some() {
-            let _ = tokio_fs::remove_dir_all(&job_dir).await;
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiError::new("Only one DOCX file can be uploaded per job.")),
-            ));
-        }
-        let safe_name = sanitize(&filename);
-        let ext = Path::new(&safe_name)
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if ext != "docx" {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiError::new("Only DOCX files are supported.")),
-            ));
-        }
-
-        let stored_path = job_dir.join(format!("source_{}", safe_name));
-
-        let mut file = tokio_fs::File::create(&stored_path)
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-        file.write_all(&bytes)
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-        file.flush()
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-
-        uploaded_file = Some(UploadedFile {
-            stored_path,
-            original_name: filename,
-        });
     }
 
     let Some(file) = uploaded_file else {
@@ -386,13 +437,16 @@ async fn create_job(
         .await
         .map_err(|err| internal_error(err.into()))?;
 
-    sqlx::query("INSERT INTO docx_jobs (id, user_id, status) VALUES ($1, $2, $3)")
-        .bind(job_id)
-        .bind(user.id)
-        .bind(STATUS_PENDING)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|err| internal_error(err.into()))?;
+    sqlx::query(
+        "INSERT INTO docx_jobs (id, user_id, status, translation_direction) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(job_id)
+    .bind(user.id)
+    .bind(STATUS_PENDING)
+    .bind(direction.as_db_value())
+    .execute(&mut *transaction)
+    .await
+    .map_err(|err| internal_error(err.into()))?;
 
     sqlx::query(
         "INSERT INTO docx_documents (id, job_id, original_filename, source_path, status) VALUES ($1, $2, $3, $4, $5)",
@@ -434,7 +488,7 @@ async fn job_status(
     let pool = state.pool();
 
     let job = sqlx::query_as::<_, JobRecord>(
-        "SELECT id, user_id, status, status_detail, error_message, created_at, updated_at FROM docx_jobs WHERE id = $1",
+        "SELECT id, user_id, status, status_detail, error_message, translation_direction, created_at, updated_at FROM docx_jobs WHERE id = $1",
     )
     .bind(job_id)
     .fetch_optional(&pool)
@@ -454,6 +508,7 @@ async fn job_status(
         ));
     }
 
+    let direction = TranslationDirection::from_db_value(&job.translation_direction);
     let documents = sqlx::query_as::<_, DocumentRecord>(
         "SELECT id, original_filename, status, status_detail, translated_path, error_message FROM docx_documents WHERE job_id = $1 ORDER BY created_at",
     )
@@ -486,6 +541,7 @@ async fn job_status(
         error_message: job.error_message,
         created_at: job.created_at.to_rfc3339(),
         updated_at: job.updated_at.to_rfc3339(),
+        translation_direction: direction.display_label().to_string(),
         documents: docs,
     };
 
@@ -571,7 +627,7 @@ fn spawn_job_worker(state: AppState, job_id: Uuid) {
 async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     let pool = state.pool();
     let job = sqlx::query_as::<_, ProcessingJobRecord>(
-        "SELECT user_id, status FROM docx_jobs WHERE id = $1",
+        "SELECT user_id, status, translation_direction FROM docx_jobs WHERE id = $1",
     )
     .bind(job_id)
     .fetch_one(&pool)
@@ -592,8 +648,10 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     .await
     .context("failed to update job status")?;
 
+    let direction = TranslationDirection::from_db_value(&job.translation_direction);
+
     let documents = sqlx::query_as::<_, ProcessingDocumentRecord>(
-        "SELECT id, original_filename, source_path FROM docx_documents WHERE job_id = $1 ORDER BY ordinal",
+        "SELECT id, original_filename, source_path FROM docx_documents WHERE job_id = $1 ORDER BY created_at",
     )
     .bind(job_id)
     .fetch_all(&pool)
@@ -616,14 +674,18 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
         error!(?err, "failed to load glossary terms");
         Vec::new()
     });
-    let translation_prompt = build_translation_prompt(&prompts, &glossary_terms);
+    let translation_prompt = build_translation_prompt(&prompts, &glossary_terms, direction);
     let llm_client = state.llm_client();
 
     let mut success_count = 0_i64;
     let mut translation_tokens_total = 0_i64;
 
     for document in documents {
-        let status_detail = format!("Reading {}", document.original_filename);
+        let status_detail = format!(
+            "Reading {} ({})",
+            document.original_filename,
+            direction.display_label()
+        );
         update_document_status(
             &pool,
             document.id,
@@ -690,8 +752,9 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
                 &pool,
                 job_id,
                 Some(&format!(
-                    "Translating {} (chunk {}/{})",
+                    "Translating {} ({}) chunk {}/{}",
                     document.original_filename,
+                    direction.display_label(),
                     chunk.id + 1,
                     chunks.len()
                 )),
@@ -702,6 +765,7 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
                 models.translation_model(),
                 translation_prompt.clone(),
                 &chunk.source_text,
+                direction,
             );
 
             let response = match llm_client.execute(request).await {
@@ -783,8 +847,9 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
 
     let status_detail = if success_count > 0 {
         Some(format!(
-            "Completed with {} translated document(s)",
-            success_count
+            "Completed {} translated document(s) ({})",
+            success_count,
+            direction.display_label()
         ))
     } else {
         Some("Job finished but no documents were successfully translated".to_string())
@@ -832,38 +897,71 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     Ok(())
 }
 
-fn build_translation_prompt(prompts: &DocxTranslatorPrompts, terms: &[GlossaryTermRow]) -> String {
-    let glossary = if terms.is_empty() {
-        "No glossary entries configured.".to_string()
-    } else {
-        let mut lines = Vec::new();
-        for term in terms {
-            lines.push(format!(
-                "EN: {} -> CN: {}",
-                term.source_term, term.target_term
-            ));
+fn build_translation_prompt(
+    prompts: &DocxTranslatorPrompts,
+    terms: &[GlossaryTermRow],
+    direction: TranslationDirection,
+) -> String {
+    let (template, glossary) = match direction {
+        TranslationDirection::EnToCn => {
+            let glossary = if terms.is_empty() {
+                "No glossary entries configured.".to_string()
+            } else {
+                let mut lines = Vec::new();
+                for term in terms {
+                    lines.push(format!(
+                        "EN: {} -> CN: {}",
+                        term.source_term, term.target_term
+                    ));
+                }
+                lines.join("\n")
+            };
+            (&prompts.en_to_cn, glossary)
         }
-        lines.join("\n")
+        TranslationDirection::CnToEn => {
+            let glossary = if terms.is_empty() {
+                "No glossary entries configured.".to_string()
+            } else {
+                let mut lines = Vec::new();
+                for term in terms {
+                    lines.push(format!(
+                        "CN: {} -> EN: {}",
+                        term.target_term, term.source_term
+                    ));
+                }
+                lines.join("\n")
+            };
+            (&prompts.cn_to_en, glossary)
+        }
     };
 
-    prompts
-        .translation
+    template
         .replace("{{GLOSSARY}}", &glossary)
         .replace("{{PARAGRAPH_SEPARATOR}}", PARAGRAPH_SEPARATOR)
 }
 
-fn build_translation_request(model: &str, prompt: String, chunk: &str) -> LlmRequest {
+fn build_translation_request(
+    model: &str,
+    prompt: String,
+    chunk: &str,
+    direction: TranslationDirection,
+) -> LlmRequest {
+    let instruction = match direction {
+        TranslationDirection::EnToCn => format!(
+            "Translate the following EN paragraphs into CN while preserving the separator {}:\n\n{}",
+            PARAGRAPH_SEPARATOR, chunk
+        ),
+        TranslationDirection::CnToEn => format!(
+            "Translate the following CN paragraphs into EN while preserving the separator {}:\n\n{}",
+            PARAGRAPH_SEPARATOR, chunk
+        ),
+    };
+
     LlmRequest::new(
         model.to_string(),
         vec![
             ChatMessage::new(MessageRole::System, prompt),
-            ChatMessage::new(
-                MessageRole::User,
-                format!(
-                    "Please translate the following paragraph group while preserving the separator {}:\n\n{}",
-                    PARAGRAPH_SEPARATOR, chunk
-                ),
-            ),
+            ChatMessage::new(MessageRole::User, instruction),
         ],
     )
 }
@@ -1188,6 +1286,7 @@ struct JobRecord {
     status: String,
     status_detail: Option<String>,
     error_message: Option<String>,
+    translation_direction: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -1210,6 +1309,7 @@ struct JobStatusResponse {
     error_message: Option<String>,
     created_at: String,
     updated_at: String,
+    translation_direction: String,
     documents: Vec<JobDocumentStatus>,
 }
 
@@ -1234,6 +1334,7 @@ struct DocumentDownloadRecord {
 struct ProcessingJobRecord {
     user_id: Uuid,
     status: String,
+    translation_direction: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1290,7 +1391,9 @@ mod tests {
     #[test]
     fn glossary_prompt_includes_terms() {
         let prompts = DocxTranslatorPrompts {
-            translation: "Use glossary:\n{{GLOSSARY}}\nKeep marker {{PARAGRAPH_SEPARATOR}}"
+            en_to_cn: "Use glossary:\n{{GLOSSARY}}\nKeep marker {{PARAGRAPH_SEPARATOR}}"
+                .to_string(),
+            cn_to_en: "Use glossary:\n{{GLOSSARY}}\nKeep marker {{PARAGRAPH_SEPARATOR}}"
                 .to_string(),
         };
         let terms = vec![GlossaryTermRow {
@@ -1300,9 +1403,13 @@ mod tests {
             notes: None,
         }];
 
-        let prompt = build_translation_prompt(&prompts, &terms);
-        assert!(prompt.contains("EN: neuron -> CN: 神经元"));
-        assert!(prompt.contains(PARAGRAPH_SEPARATOR));
+        let prompt_en = build_translation_prompt(&prompts, &terms, TranslationDirection::EnToCn);
+        assert!(prompt_en.contains("EN: neuron -> CN: 神经元"));
+        assert!(prompt_en.contains(PARAGRAPH_SEPARATOR));
+
+        let prompt_cn = build_translation_prompt(&prompts, &terms, TranslationDirection::CnToEn);
+        assert!(prompt_cn.contains("CN: 神经元 -> EN: neuron"));
+        assert!(prompt_cn.contains(PARAGRAPH_SEPARATOR));
     }
 
     #[test]

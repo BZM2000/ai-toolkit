@@ -44,7 +44,7 @@
 - Prompt copy for modules is stored in `config/prompts.yaml`; override the path with `PROMPTS_CONFIG_PATH` if you need an alternate config per environment.
 - The config mirrors the models file: add a section under `modules` matching the module name and define named prompt strings (use multi-line blocks with `|-` for readability).
 - Summarizer translation copy lives under `translation` and must include the placeholder `{{GLOSSARY}}`, which is replaced at runtime with one EN -> CN pair per line. Omit the placeholder only if the prompt already explains how to reference a glossary.
-- DOCX translator prompts live under `modules.translate_docx.translation`; they must include both `{{GLOSSARY}}` and `{{PARAGRAPH_SEPARATOR}}` so the runtime can inject glossary lines and the paragraph boundary marker used for chunking.
+- DOCX translator prompts expose `en_to_cn` and `cn_to_en` strings under `modules.translate_docx`; each must include `{{GLOSSARY}}` and `{{PARAGRAPH_SEPARATOR}}` so the runtime can inject glossary lines and the paragraph boundary marker used for chunking.
 - Keep prompts trimmed of Markdown unless the downstream module explicitly renders Markdown; summarizer currently treats prompts as plain text.
 - As with the models config, any prompt changes require restarting the server so `AppState` reloads the YAML.
 
@@ -61,9 +61,9 @@
 
 ## DOCX Translator Module
 - Routes mounted under `/tools/translatedocx` (HTML form) and `/api/translatedocx` (status/download endpoints).
-- Accepts a single `.docx` file per job, translating it to CN while preserving glossary terminology and the paragraph separator marker.
+- Accepts a single `.docx` file per job, with a user-facing toggle for EN → CN or CN → EN translation; glossary substitutions and the paragraph separator marker are honored in both directions.
 - Background worker rewrites the uploaded file into a fresh DOCX stored at `storage/translatedocx/<job_id>/translated_1.docx` and exposes a direct download once complete.
-- `docx_jobs` and `docx_documents` tables capture job and document state; token usage and chunk counts are recorded for auditability.
+- `docx_jobs` and `docx_documents` tables capture job and document state (including the persisted `translation_direction`); token usage and chunk counts are recorded for auditability.
 - Translated downloads live at `/api/translatedocx/jobs/{job}/{doc}/download/translated`.
 - Usage counting mirrors the summarizer: each successful document increments `users.usage_count`, and the job aborts if account limits would be exceeded.
 

@@ -14,9 +14,15 @@ modules:
       {{GLOSSARY}}
       Preserve citations, references, and technical terms.
   translate_docx:
-    translation: |-
+    en_to_cn: |-
       You are an expert translator for academic manuscripts from English (EN) to Chinese (CN). Maintain formal academic tone and style in CN.
       Use the glossary consistently—each entry is EN -> CN:
+      {{GLOSSARY}}
+      The user's input contains multiple paragraphs separated by the exact marker {{PARAGRAPH_SEPARATOR}}. Return the translated paragraphs with the same marker preserved between them.
+      If a paragraph is only a URL or citation, return it unchanged.
+    cn_to_en: |-
+      You are an expert translator for academic manuscripts from Chinese (CN) to English (EN). Maintain formal academic tone and style in EN (British academic English preferred).
+      Use the glossary consistently—each entry is CN -> EN:
       {{GLOSSARY}}
       The user's input contains multiple paragraphs separated by the exact marker {{PARAGRAPH_SEPARATOR}}. Return the translated paragraphs with the same marker preserved between them.
       If a paragraph is only a URL or citation, return it unchanged.

@@ -134,5 +134,8 @@ impl PromptsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DocxTranslatorPrompts {
-    pub translation: String,
+    #[serde(rename = "en_to_cn")]
+    pub en_to_cn: String,
+    #[serde(rename = "cn_to_en")]
+    pub cn_to_en: String,
 }
