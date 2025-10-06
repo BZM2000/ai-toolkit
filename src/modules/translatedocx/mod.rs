@@ -100,6 +100,9 @@ async fn translatedocx_page(
     <style>
         body {{ font-family: Arial, sans-serif; margin: 0; background: #020617; color: #e2e8f0; }}
         header {{ background: #0f172a; padding: 2rem 1.5rem; }}
+        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #38bdf8; text-decoration: none; font-weight: 600; background: rgba(56, 189, 248, 0.15); padding: 0.5rem 0.85rem; border-radius: 999px; border: 1px solid rgba(56, 189, 248, 0.3); transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: rgba(14, 165, 233, 0.2); border-color: rgba(14, 165, 233, 0.4); }}
         main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; }}
         section {{ margin-bottom: 2.5rem; }}
         .panel {{ background: #0f172a; border-radius: 12px; padding: 1.5rem; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.35); }}
@@ -134,7 +137,10 @@ async fn translatedocx_page(
 </head>
 <body>
     <header>
-        <h1>DOCX Translator</h1>
+        <div class="header-bar">
+            <h1>DOCX Translator</h1>
+            <a class="back-link" href="/">← Back to main page</a>
+        </div>
         <p class="note">Signed in as <strong>{username}</strong>. Upload a DOCX file to translate it using the shared glossary.</p>
     </header>
     <main>

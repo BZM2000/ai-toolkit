@@ -81,6 +81,12 @@ struct LoginForm {
 }
 
 #[derive(Default, Deserialize)]
+struct LandingQuery {
+    status: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
 struct DashboardQuery {
     status: Option<String>,
     error: Option<String>,
@@ -171,6 +177,7 @@ async fn app_main() -> Result<()> {
     let app = Router::new()
         .route("/", get(landing_page))
         .route("/login", get(login_page).post(process_login))
+        .route("/logout", post(logout))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/users", post(create_user))
         .route("/dashboard/users/password", post(update_user_password))
@@ -276,23 +283,40 @@ impl AppState {
 async fn landing_page(
     State(state): State<AppState>,
     jar: CookieJar,
-) -> Result<Html<&'static str>, Redirect> {
-    if let Some(redirect) = redirect_if_authenticated(&state, &jar).await {
-        return Err(redirect);
-    }
+    Query(params): Query<LandingQuery>,
+) -> Html<String> {
+    let maybe_user = if let Some(cookie) = jar.get(SESSION_COOKIE) {
+        if let Ok(token) = Uuid::parse_str(cookie.value()) {
+            match fetch_user_by_session(&state.pool, token).await {
+                Ok(user) => user,
+                Err(err) => {
+                    error!(?err, "failed to resolve session for landing page");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    Ok(Html(LOGIN_PAGE_HTML))
+    if let Some(user) = maybe_user {
+        Html(render_main_page(&user, &params))
+    } else {
+        Html(LOGIN_PAGE_HTML.to_string())
+    }
 }
 
 async fn login_page(
     State(state): State<AppState>,
     jar: CookieJar,
-) -> Result<Html<&'static str>, Redirect> {
+) -> Result<Html<String>, Redirect> {
     if let Some(redirect) = redirect_if_authenticated(&state, &jar).await {
         return Err(redirect);
     }
 
-    Ok(Html(LOGIN_PAGE_HTML))
+    Ok(Html(LOGIN_PAGE_HTML.to_string()))
 }
 
 async fn redirect_if_authenticated(state: &AppState, jar: &CookieJar) -> Option<Redirect> {
@@ -300,7 +324,7 @@ async fn redirect_if_authenticated(state: &AppState, jar: &CookieJar) -> Option<
     let token = Uuid::parse_str(token_cookie.value()).ok()?;
 
     match fetch_user_by_session(&state.pool, token).await {
-        Ok(Some(_)) => Some(Redirect::to("/dashboard")),
+        Ok(Some(_)) => Some(Redirect::to("/")),
         Ok(None) => None,
         Err(err) => {
             error!(?err, "failed to validate session for access gate");
@@ -351,7 +375,32 @@ async fn process_login(
     cookie.set_max_age(CookieDuration::days(SESSION_TTL_DAYS));
 
     let jar = jar.add(cookie);
-    Ok((jar, Redirect::to("/dashboard")))
+    Ok((jar, Redirect::to("/")))
+}
+
+async fn logout(State(state): State<AppState>, jar: CookieJar) -> (CookieJar, Redirect) {
+    let mut jar = jar;
+
+    if let Some(cookie) = jar.get(SESSION_COOKIE) {
+        if let Ok(token) = Uuid::parse_str(cookie.value()) {
+            if let Err(err) = sqlx::query("DELETE FROM sessions WHERE id = $1")
+                .bind(token)
+                .execute(&state.pool)
+                .await
+            {
+                error!(?err, "failed to remove session during logout");
+            }
+        }
+    }
+
+    let mut removal = Cookie::new(SESSION_COOKIE, "");
+    removal.set_path("/");
+    removal.set_http_only(true);
+    removal.set_same_site(SameSite::Lax);
+    removal.set_max_age(CookieDuration::seconds(0));
+    jar = jar.remove(removal);
+
+    (jar, Redirect::to("/?status=logged_out"))
 }
 
 async fn dashboard(
@@ -376,6 +425,10 @@ async fn dashboard(
             return Err(Redirect::to("/login"));
         }
     };
+
+    if !auth_user.is_admin {
+        return Err(Redirect::to("/?error=not_authorized"));
+    }
 
     let users = match fetch_dashboard_users(&state.pool).await {
         Ok(list) => list,
@@ -619,6 +672,9 @@ async fn dashboard(
     <style>
         body {{ font-family: Arial, sans-serif; margin: 0; background: #020617; color: #e2e8f0; }}
         header {{ background: #0f172a; padding: 2rem 1.5rem; }}
+        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #38bdf8; text-decoration: none; font-weight: 600; background: rgba(56, 189, 248, 0.15); padding: 0.5rem 0.85rem; border-radius: 999px; border: 1px solid rgba(56, 189, 248, 0.3); transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: rgba(14, 165, 233, 0.2); border-color: rgba(14, 165, 233, 0.4); }}
         main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; }}
         th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #1f2937; text-align: left; }}
@@ -652,11 +708,14 @@ async fn dashboard(
 </head>
 <body>
     <header>
-        <h1>Usage Dashboard</h1>
+        <div class="header-bar">
+            <h1>Usage Dashboard</h1>
+            <a class="back-link" href="/">← Back to main page</a>
+        </div>
         <p>Monitor account quotas and background activity at a glance.</p>
     </header>
     <main>
-        <p data-user-id="{auth_user_id}">Signed in as <strong>{username}</strong>. <a href="/">View landing page</a></p>
+        <p data-user-id="{auth_user_id}">Signed in as <strong>{username}</strong>.</p>
         {message_block}
         <table>
             <thead>
@@ -712,7 +771,7 @@ async fn create_user(
     };
 
     if !auth_user.is_admin {
-        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+        return Ok(Redirect::to("/?error=not_authorized"));
     }
 
     let username = form.username.trim();
@@ -786,7 +845,7 @@ async fn update_user_password(
     };
 
     if !auth_user.is_admin {
-        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+        return Ok(Redirect::to("/?error=not_authorized"));
     }
 
     let username = form.username.trim();
@@ -844,7 +903,7 @@ async fn create_glossary_term(
     };
 
     if !auth_user.is_admin {
-        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+        return Ok(Redirect::to("/?error=not_authorized"));
     }
 
     let GlossaryCreateForm {
@@ -913,7 +972,7 @@ async fn update_glossary_term(
     };
 
     if !auth_user.is_admin {
-        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+        return Ok(Redirect::to("/?error=not_authorized"));
     }
 
     let GlossaryUpdateForm {
@@ -986,7 +1045,7 @@ async fn delete_glossary_term(
     };
 
     if !auth_user.is_admin {
-        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+        return Ok(Redirect::to("/?error=not_authorized"));
     }
 
     let delete_result = sqlx::query("DELETE FROM glossary_terms WHERE id = $1")
@@ -1030,7 +1089,7 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
     if let Some(error) = params.error.as_deref() {
         let message = match error {
             "duplicate" => "Username already exists.",
-            "not_authorized" => "Only administrators can create new users.",
+            "not_authorized" => "Administrator privileges required.",
             "missing_username" => "Username is required.",
             "missing_password" => "Password is required.",
             "password_missing" => "New password is required.",
@@ -1040,6 +1099,121 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
             "glossary_duplicate" => "A glossary term with that source already exists.",
             "glossary_not_found" => "Glossary term was not found.",
             _ => "Unexpected error. Check logs for details.",
+        };
+
+        return format!("<div class=\"flash error\">{message}</div>");
+    }
+
+    String::new()
+}
+
+fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
+    let username = escape_html(&user.username);
+    let flash = compose_landing_flash(params);
+
+    let modules = [
+        (
+            "Summarizer & Translator",
+            "Generate structured summaries and Chinese translations for uploaded documents.",
+            "/tools/summarizer",
+        ),
+        (
+            "DOCX Translator",
+            "Translate Word documents paragraph-by-paragraph with glossary guidance.",
+            "/tools/translatedocx",
+        ),
+    ];
+
+    let module_cards = modules
+        .iter()
+        .map(|(title, description, href)| {
+            format!(
+                "<a class=\"module-card\" href=\"{href}\"><h2>{title}</h2><p>{description}</p><span class=\"cta\">Open module →</span></a>",
+                title = escape_html(title),
+                description = escape_html(description),
+                href = href,
+            )
+        })
+        .collect::<String>();
+
+    let admin_button = if user.is_admin {
+        "<a class=\"admin-link\" href=\"/dashboard\">Admin dashboard</a>".to_string()
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Zhang Group AI Toolkit</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root {{ color-scheme: dark; }}
+        body {{ font-family: Arial, sans-serif; margin: 0; background: #020617; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; }}
+        header {{ background: #0f172a; padding: clamp(2rem, 4vw, 2.75rem) clamp(1.5rem, 6vw, 3rem); display: flex; flex-direction: column; gap: 1rem; }}
+        .header-top {{ display: flex; flex-direction: column; gap: 0.5rem; }}
+        .header-top h1 {{ margin: 0; font-size: clamp(1.9rem, 3vw, 2.4rem); }}
+        .header-top p {{ margin: 0; color: #94a3b8; }}
+        .header-actions {{ display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }}
+        .header-actions span {{ color: #cbd5f5; font-size: 0.95rem; }}
+        .logout-form button {{ padding: 0.6rem 1.2rem; border: none; border-radius: 999px; background: #38bdf8; color: #0f172a; font-weight: 600; cursor: pointer; }}
+        .logout-form button:hover {{ background: #0ea5e9; }}
+        main {{ flex: 1; padding: clamp(2rem, 5vw, 3rem); max-width: 1100px; margin: 0 auto; width: 100%; }}
+        .flash {{ padding: 1rem 1.25rem; border-radius: 10px; margin-bottom: 1.5rem; font-weight: 600; }}
+        .flash.success {{ background: rgba(34, 197, 94, 0.18); color: #bbf7d0; }}
+        .flash.error {{ background: rgba(248, 113, 113, 0.18); color: #fecaca; }}
+        .modules-grid {{ display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }}
+        .module-card {{ display: block; background: #0f172a; padding: 1.75rem; border-radius: 16px; text-decoration: none; color: inherit; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.3); transition: transform 0.15s ease, box-shadow 0.15s ease, border 0.15s ease; border: 1px solid rgba(148, 163, 184, 0.1); }}
+        .module-card:hover {{ transform: translateY(-4px); box-shadow: 0 24px 50px rgba(15, 23, 42, 0.4); border-color: rgba(56, 189, 248, 0.45); }}
+        .module-card h2 {{ margin-top: 0; margin-bottom: 0.75rem; font-size: 1.25rem; }}
+        .module-card p {{ margin: 0 0 1.25rem 0; color: #cbd5f5; font-size: 0.95rem; line-height: 1.5; }}
+        .module-card .cta {{ font-weight: 600; color: #38bdf8; }}
+        .admin-link {{ display: inline-flex; align-items: center; justify-content: center; margin-top: 2.5rem; padding: 0.85rem 1.5rem; border-radius: 12px; background: rgba(56, 189, 248, 0.18); color: #38bdf8; text-decoration: none; font-weight: 600; border: 1px solid rgba(56, 189, 248, 0.35); transition: background 0.15s ease, border 0.15s ease; }}
+        .admin-link:hover {{ background: rgba(14, 165, 233, 0.25); border-color: rgba(14, 165, 233, 0.5); }}
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-top">
+            <h1>Zhang Group AI Toolkit</h1>
+            <p>Select a module to get started.</p>
+        </div>
+        <div class="header-actions">
+            <span>Signed in as <strong>{username}</strong></span>
+            <form class="logout-form" method="post" action="/logout">
+                <button type="submit">Log out</button>
+            </form>
+        </div>
+    </header>
+    <main>
+        {flash}
+        <div class="modules-grid">
+            {module_cards}
+        </div>
+        {admin_button}
+    </main>
+</body>
+</html>"#,
+        username = username,
+        flash = flash,
+        module_cards = module_cards,
+        admin_button = admin_button,
+    )
+}
+
+fn compose_landing_flash(params: &LandingQuery) -> String {
+    if let Some(status) = params.status.as_deref() {
+        if status == "logged_out" {
+            return "<div class=\"flash success\">You have been signed out.</div>".to_string();
+        }
+    }
+
+    if let Some(error) = params.error.as_deref() {
+        let message = match error {
+            "not_authorized" => "Administrator privileges are required for that action.",
+            _ => "Unexpected error. Please try again.",
         };
 
         return format!("<div class=\"flash error\">{message}</div>");
