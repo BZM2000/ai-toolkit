@@ -24,3 +24,37 @@
 - Instantiate a client with `let client = LlmClient::from_env()?;` and create a request using provider-prefixed models like `openrouter/openai/gpt-4o` or `poe/claude-3-haiku`.
 - Build chat turns with `ChatMessage::new(MessageRole::User, "prompt")`; attach files using `FileAttachment::new` (OpenRouter only supports `AttachmentKind::Image | Audio | Pdf`).
 - Call `client.execute(request).await?` to receive `LlmResponse` containing assistant text, provider info, raw JSON, and token counts (approximate when providers omit them).
+
+## Model Configuration
+- All tool model selections live in `config/models.yaml`; override path with `MODELS_CONFIG_PATH` env var if needed.
+- Example schema:
+  ```yaml
+  modules:
+    summarizer:
+      summary_model: "openrouter/anthropic/claude-3-haiku"
+      translation_model: "openrouter/openai/gpt-4o-mini"
+  ```
+- `AppState` loads this once at startup; modules clone the config via `state.models_config()`.
+
+## Summarizer Module
+- Routes mounted under `/tools/summarizer` (HTML form) and `/api/summarizer` (JSON/download endpoints).
+- Authenticated users can upload up to 10 `.pdf`, `.docx`, or `.txt` files per job, select document type, and toggle translation; background worker writes outputs to `storage/summarizer/<job_id>/`.
+- Progress and downloads:
+  - `POST /tools/summarizer/jobs` → returns `job_id`.
+  - `GET /api/summarizer/jobs/{job_id}` → JSON status (per-document links, combined outputs, error info).
+  - `GET /api/summarizer/jobs/{job_id}/documents/{doc_id}/download/{summary|translation}` → authenticated file stream.
+  - `GET /api/summarizer/jobs/{job_id}/combined/{summary|translation}` → combined text downloads.
+- Glossary terms are now persisted in `glossary_terms`; admins manage them from the dashboard, and translation prompts incorporate the local glossary (no external fetch).
+- Usage accounting: `users.usage_count` increments by successfully processed documents; request is rejected if projected usage would exceed `usage_limit`.
+
+## Database
+- `migrations/0002_glossary.sql` creates `glossary_terms` with case-insensitive uniqueness on `source_term`.
+- `migrations/0003_summarizer.sql` adds `summary_jobs` and `summary_documents` for async processing metadata; indexes support job history lookups.
+
+## File System
+- Runtime artifacts persist under `storage/summarizer/`; `.gitignore` ignores this directory by default.
+- Each job directory contains `summary_n.txt`, optional `translation_n.txt`, and combined outputs created with Markdown-style headings for readability.
+
+## Testing & Verification
+- Unit tests (`cargo test`) cover translation prompt assembly and DOCX text extraction helpers.
+- For manual end-to-end checks: run `cargo run`, log in as an admin, add glossary entries, submit a summarizer job, watch `/api/summarizer/jobs/{id}` poll results, and verify downloads.

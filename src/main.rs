@@ -1,6 +1,8 @@
+mod config;
 pub mod llm;
+mod modules;
 
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use argon2::Argon2;
@@ -24,7 +26,9 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-const SESSION_COOKIE: &str = "auth_token";
+use crate::{config::ModelsConfig, llm::LlmClient};
+
+pub(crate) const SESSION_COOKIE: &str = "auth_token";
 const SESSION_TTL_DAYS: i64 = 7;
 const LOGIN_PAGE_HTML: &str = r##"<!DOCTYPE html>
 <html lang="en">
@@ -62,6 +66,8 @@ const LOGIN_PAGE_HTML: &str = r##"<!DOCTYPE html>
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
+    models: Arc<ModelsConfig>,
+    llm: LlmClient,
 }
 
 #[derive(Deserialize)]
@@ -92,6 +98,28 @@ struct UpdatePasswordForm {
     password: String,
 }
 
+#[derive(Deserialize)]
+struct GlossaryCreateForm {
+    source_term: String,
+    target_term: String,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GlossaryUpdateForm {
+    id: Uuid,
+    source_term: String,
+    target_term: String,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GlossaryDeleteForm {
+    id: Uuid,
+}
+
 #[derive(Clone, sqlx::FromRow)]
 struct DbUserAuth {
     id: Uuid,
@@ -111,6 +139,14 @@ struct DashboardUserRow {
     usage_count: i64,
     usage_limit: Option<i64>,
     is_admin: bool,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct GlossaryTermRow {
+    pub(crate) id: Uuid,
+    pub(crate) source_term: String,
+    pub(crate) target_term: String,
+    pub(crate) notes: Option<String>,
 }
 
 #[tokio::main]
@@ -134,6 +170,10 @@ async fn app_main() -> Result<()> {
         .route("/dashboard", get(dashboard))
         .route("/dashboard/users", post(create_user))
         .route("/dashboard/users/password", post(update_user_password))
+        .route("/dashboard/glossary", post(create_glossary_term))
+        .route("/dashboard/glossary/update", post(update_glossary_term))
+        .route("/dashboard/glossary/delete", post(delete_glossary_term))
+        .merge(modules::summarizer::router())
         .with_state(state);
 
     let port: u16 = env::var("PORT")
@@ -153,7 +193,11 @@ async fn app_main() -> Result<()> {
 
 impl AppState {
     async fn new() -> Result<Self> {
+        let models_config =
+            ModelsConfig::load_default().context("failed to load models configuration")?;
         let database_url = env::var("DATABASE_URL").context("DATABASE_URL env var is missing")?;
+
+        let llm_client = LlmClient::from_env().context("failed to initialize LLM client")?;
 
         let pool = PgPoolOptions::new()
             .max_connections(10)
@@ -166,7 +210,11 @@ impl AppState {
             .await
             .context("failed to run database migrations")?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            models: Arc::new(models_config),
+            llm: llm_client,
+        })
     }
 
     async fn ensure_seed_admin(&self) -> Result<()> {
@@ -198,6 +246,18 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    fn models_config(&self) -> Arc<ModelsConfig> {
+        Arc::clone(&self.models)
+    }
+
+    fn llm_client(&self) -> LlmClient {
+        self.llm.clone()
+    }
+
+    fn pool(&self) -> PgPool {
+        self.pool.clone()
     }
 }
 
@@ -360,7 +420,120 @@ async fn dashboard(
     let message_block = compose_flash_message(&params);
 
     let admin_controls = if auth_user.is_admin {
-        format!(
+        let glossary_terms = match fetch_glossary_terms(&state.pool).await {
+            Ok(list) => list,
+            Err(err) => {
+                error!(?err, "failed to load glossary terms");
+                Vec::new()
+            }
+        };
+
+        let mut glossary_rows = String::new();
+        let mut glossary_select_options = String::new();
+
+        if glossary_terms.is_empty() {
+            glossary_rows.push_str("<tr><td colspan=\"4\">No glossary entries yet.</td></tr>");
+        } else {
+            for term in &glossary_terms {
+                let notes_display = term
+                    .notes
+                    .as_ref()
+                    .map(|n| escape_html(n))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "—".to_string());
+                glossary_rows.push_str(&format!(
+                    r#"<tr><td>{source}</td><td>{target}</td><td>{notes}</td><td>
+    <form method="post" action="/dashboard/glossary/delete" onsubmit="return confirm('Remove this glossary term?');">
+        <input type="hidden" name="id" value="{id}">
+        <button type="submit" class="danger">Delete</button>
+    </form>
+</td></tr>"#,
+                    source = escape_html(&term.source_term),
+                    target = escape_html(&term.target_term),
+                    notes = notes_display,
+                    id = term.id
+                ));
+
+                glossary_select_options.push_str(&format!(
+                    "<option value=\"{id}\">{label}</option>",
+                    id = term.id,
+                    label = escape_html(&term.source_term)
+                ));
+            }
+        }
+
+        let (glossary_select_options, glossary_update_disabled_attr) = if glossary_select_options
+            .is_empty()
+        {
+            (
+                "<option value=\"\" disabled selected>No entries available</option>".to_string(),
+                " disabled",
+            )
+        } else {
+            (glossary_select_options, "")
+        };
+
+        let glossary_section = format!(
+            r##"<section class="admin">
+    <h2>Glossary Management</h2>
+    <p class="section-note">Terms here feed the translation glossary for consistency.</p>
+    <div class="stack">
+        <table class="glossary">
+            <thead>
+                <tr><th>Source Term</th><th>Target Term</th><th>Notes</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+                {glossary_rows}
+            </tbody>
+        </table>
+        <div class="glossary-forms">
+            <form method="post" action="/dashboard/glossary">
+                <h3>Add Term</h3>
+                <div class="field">
+                    <label for="glossary-source">Source term</label>
+                    <input id="glossary-source" name="source_term" required>
+                </div>
+                <div class="field">
+                    <label for="glossary-target">Target term</label>
+                    <input id="glossary-target" name="target_term" required>
+                </div>
+                <div class="field">
+                    <label for="glossary-notes">Notes (optional)</label>
+                    <input id="glossary-notes" name="notes" placeholder="Context or usage notes">
+                </div>
+                <button type="submit">Add term</button>
+            </form>
+            <form method="post" action="/dashboard/glossary/update">
+                <h3>Update Term</h3>
+                <div class="field">
+                    <label for="glossary-update-id">Select term</label>
+                    <select id="glossary-update-id" name="id" required{glossary_update_disabled_attr}>
+                        {glossary_select_options}
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="glossary-update-source">New source term</label>
+                    <input id="glossary-update-source" name="source_term" required{glossary_update_disabled_attr}>
+                </div>
+                <div class="field">
+                    <label for="glossary-update-target">New target term</label>
+                    <input id="glossary-update-target" name="target_term" required{glossary_update_disabled_attr}>
+                </div>
+                <div class="field">
+                    <label for="glossary-update-notes">Notes (optional)</label>
+                    <input id="glossary-update-notes" name="notes" placeholder="Context or usage notes"{glossary_update_disabled_attr}>
+                </div>
+                <button type="submit"{glossary_update_disabled_attr}>Save changes</button>
+            </form>
+        </div>
+    </div>
+</section>"##,
+            glossary_rows = glossary_rows,
+            glossary_select_options = glossary_select_options,
+            glossary_update_disabled_attr = glossary_update_disabled_attr
+        );
+
+        let mut controls = format!(
             r##"<section class="admin">
     <h2>Create User</h2>
     <form method="post" action="/dashboard/users">
@@ -400,6 +573,19 @@ async fn dashboard(
 </section>"##,
             user_options = user_options,
             reset_disabled_attr = reset_disabled_attr
+        );
+        controls.push_str(&glossary_section);
+        controls
+    } else {
+        String::new()
+    };
+
+    let models_config = state.models_config();
+    let summarizer_note = if let Some(models) = models_config.summarizer() {
+        format!(
+            "<p class=\"meta-note\">Summaries use <code>{summary}</code>; translations use <code>{translation}</code>.</p>",
+            summary = escape_html(models.summary_model()),
+            translation = escape_html(models.translation_model())
         )
     } else {
         String::new()
@@ -421,16 +607,29 @@ async fn dashboard(
         th {{ background: #0f172a; }}
         a {{ color: #38bdf8; text-decoration: none; }}
         .meta {{ margin-top: 1rem; font-size: 0.95rem; color: #94a3b8; }}
+        .meta-note {{ margin-bottom: 0.5rem; }}
         .flash {{ padding: 1rem; border-radius: 8px; margin-top: 1rem; }}
         .flash.success {{ background: rgba(34, 197, 94, 0.15); color: #bbf7d0; border: 1px solid rgba(34, 197, 94, 0.4); }}
         .flash.error {{ background: rgba(239, 68, 68, 0.15); color: #fecaca; border: 1px solid rgba(239, 68, 68, 0.4); }}
         .admin {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #0f172a; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.35); }}
         .admin h2 {{ margin-top: 0; color: #38bdf8; }}
+        .admin h3 {{ margin-top: 0; color: #38bdf8; font-size: 1.05rem; }}
         .field {{ margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }}
         .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #334155; background: #020617; color: #e2e8f0; }}
         .field.checkbox {{ flex-direction: row; align-items: center; gap: 0.6rem; }}
         button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #38bdf8; color: #020617; font-weight: bold; cursor: pointer; }}
+        button.danger {{ background: rgba(239, 68, 68, 0.85); color: #fff; }}
+        button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
         tr.current-user td {{ background: rgba(56, 189, 248, 0.15); }}
+        .section-note {{ margin-top: -0.5rem; margin-bottom: 1rem; color: #94a3b8; }}
+        .stack {{ display: flex; flex-direction: column; gap: 1.5rem; }}
+        table.glossary {{ margin-top: 0; }}
+        .glossary-forms {{ display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }}
+        .glossary-forms form {{ border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; background: #020617; box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.3); }}
+        .tools {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #0f172a; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.35); }}
+        .tools h2 {{ margin-top: 0; color: #38bdf8; }}
+        .tools ul {{ list-style: none; margin: 0; padding: 0; }}
+        .tools li {{ margin-bottom: 0.5rem; }}
     </style>
 </head>
 <body>
@@ -450,8 +649,15 @@ async fn dashboard(
             </tbody>
         </table>
         <div class="meta">
+            {summarizer_note}
             <p>Future enhancements: add user provisioning tools, logs, and real-time LLM activity streams.</p>
         </div>
+        <section class="tools">
+            <h2>Available Tools</h2>
+            <ul>
+                <li><a href="/tools/summarizer">Document Summarizer &amp; Translator</a></li>
+            </ul>
+        </section>
         {admin_controls}
     </main>
 </body>
@@ -460,7 +666,8 @@ async fn dashboard(
         auth_user_id = auth_user.id,
         message_block = message_block,
         table_rows = table_rows,
-        admin_controls = admin_controls
+        admin_controls = admin_controls,
+        summarizer_note = summarizer_note
     );
 
     Ok(Html(html))
@@ -598,6 +805,187 @@ async fn update_user_password(
     }
 }
 
+async fn create_glossary_term(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<GlossaryCreateForm>,
+) -> Result<Redirect, Redirect> {
+    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
+        return Err(Redirect::to("/login"));
+    };
+
+    let token = match Uuid::parse_str(token_cookie.value()) {
+        Ok(token) => token,
+        Err(_) => return Err(Redirect::to("/login")),
+    };
+
+    let auth_user = match fetch_user_by_session(&state.pool, token).await {
+        Ok(Some(user)) => user,
+        _ => return Err(Redirect::to("/login")),
+    };
+
+    if !auth_user.is_admin {
+        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+    }
+
+    let GlossaryCreateForm {
+        source_term,
+        target_term,
+        notes,
+    } = form;
+
+    let source_clean = source_term.trim().to_owned();
+    let target_clean = target_term.trim().to_owned();
+
+    if source_clean.is_empty() || target_clean.is_empty() {
+        return Ok(Redirect::to("/dashboard?error=glossary_missing_fields"));
+    }
+
+    let notes_clean = notes.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let insert_result = sqlx::query(
+        "INSERT INTO glossary_terms (id, source_term, target_term, notes) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&source_clean)
+    .bind(&target_clean)
+    .bind(notes_clean.as_deref())
+    .execute(&state.pool)
+    .await;
+
+    match insert_result {
+        Ok(_) => Ok(Redirect::to("/dashboard?status=glossary_created")),
+        Err(sqlx::Error::Database(db_err))
+            if db_err.constraint() == Some("idx_glossary_terms_source_lower") =>
+        {
+            Ok(Redirect::to("/dashboard?error=glossary_duplicate"))
+        }
+        Err(err) => {
+            error!(?err, "failed to create glossary term");
+            Ok(Redirect::to("/dashboard?error=unknown"))
+        }
+    }
+}
+
+async fn update_glossary_term(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<GlossaryUpdateForm>,
+) -> Result<Redirect, Redirect> {
+    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
+        return Err(Redirect::to("/login"));
+    };
+
+    let token = match Uuid::parse_str(token_cookie.value()) {
+        Ok(token) => token,
+        Err(_) => return Err(Redirect::to("/login")),
+    };
+
+    let auth_user = match fetch_user_by_session(&state.pool, token).await {
+        Ok(Some(user)) => user,
+        _ => return Err(Redirect::to("/login")),
+    };
+
+    if !auth_user.is_admin {
+        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+    }
+
+    let GlossaryUpdateForm {
+        id,
+        source_term,
+        target_term,
+        notes,
+    } = form;
+
+    let source_clean = source_term.trim().to_owned();
+    let target_clean = target_term.trim().to_owned();
+
+    if source_clean.is_empty() || target_clean.is_empty() {
+        return Ok(Redirect::to("/dashboard?error=glossary_missing_fields"));
+    }
+
+    let notes_clean = notes.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    });
+
+    let update_result = sqlx::query(
+        "UPDATE glossary_terms SET source_term = $2, target_term = $3, notes = $4, updated_at = NOW() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&source_clean)
+    .bind(&target_clean)
+    .bind(notes_clean.as_deref())
+    .execute(&state.pool)
+    .await;
+
+    match update_result {
+        Ok(result) if result.rows_affected() > 0 => {
+            Ok(Redirect::to("/dashboard?status=glossary_updated"))
+        }
+        Ok(_) => Ok(Redirect::to("/dashboard?error=glossary_not_found")),
+        Err(sqlx::Error::Database(db_err))
+            if db_err.constraint() == Some("idx_glossary_terms_source_lower") =>
+        {
+            Ok(Redirect::to("/dashboard?error=glossary_duplicate"))
+        }
+        Err(err) => {
+            error!(?err, "failed to update glossary term");
+            Ok(Redirect::to("/dashboard?error=unknown"))
+        }
+    }
+}
+
+async fn delete_glossary_term(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<GlossaryDeleteForm>,
+) -> Result<Redirect, Redirect> {
+    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
+        return Err(Redirect::to("/login"));
+    };
+
+    let token = match Uuid::parse_str(token_cookie.value()) {
+        Ok(token) => token,
+        Err(_) => return Err(Redirect::to("/login")),
+    };
+
+    let auth_user = match fetch_user_by_session(&state.pool, token).await {
+        Ok(Some(user)) => user,
+        _ => return Err(Redirect::to("/login")),
+    };
+
+    if !auth_user.is_admin {
+        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+    }
+
+    let delete_result = sqlx::query("DELETE FROM glossary_terms WHERE id = $1")
+        .bind(form.id)
+        .execute(&state.pool)
+        .await;
+
+    match delete_result {
+        Ok(result) if result.rows_affected() > 0 => {
+            Ok(Redirect::to("/dashboard?status=glossary_deleted"))
+        }
+        Ok(_) => Ok(Redirect::to("/dashboard?error=glossary_not_found")),
+        Err(err) => {
+            error!(?err, "failed to delete glossary term");
+            Ok(Redirect::to("/dashboard?error=unknown"))
+        }
+    }
+}
 fn compose_flash_message(params: &DashboardQuery) -> String {
     if let Some(status) = params.status.as_deref() {
         match status {
@@ -606,6 +994,15 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
             }
             "password_updated" => {
                 return "<div class=\"flash success\">Password updated.</div>".to_string();
+            }
+            "glossary_created" => {
+                return "<div class=\"flash success\">Glossary term added.</div>".to_string();
+            }
+            "glossary_updated" => {
+                return "<div class=\"flash success\">Glossary term updated.</div>".to_string();
+            }
+            "glossary_deleted" => {
+                return "<div class=\"flash success\">Glossary term removed.</div>".to_string();
             }
             _ => {}
         }
@@ -620,6 +1017,9 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
             "password_missing" => "New password is required.",
             "user_missing" => "User could not be found.",
             "hash_failed" => "Failed to process password. Please retry.",
+            "glossary_missing_fields" => "Source and target terms are required.",
+            "glossary_duplicate" => "A glossary term with that source already exists.",
+            "glossary_not_found" => "Glossary term was not found.",
             _ => "Unexpected error. Check logs for details.",
         };
 
@@ -667,7 +1067,7 @@ fn verify_password(password: &str, password_hash: &str) -> bool {
         .is_ok()
 }
 
-fn escape_html(input: &str) -> String {
+pub(crate) fn escape_html(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
@@ -701,6 +1101,14 @@ async fn fetch_user_by_session(pool: &PgPool, token: Uuid) -> sqlx::Result<Optio
 async fn fetch_dashboard_users(pool: &PgPool) -> sqlx::Result<Vec<DashboardUserRow>> {
     sqlx::query_as::<_, DashboardUserRow>(
         "SELECT username, usage_count, usage_limit, is_admin FROM users ORDER BY username",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub(crate) async fn fetch_glossary_terms(pool: &PgPool) -> sqlx::Result<Vec<GlossaryTermRow>> {
+    sqlx::query_as::<_, GlossaryTermRow>(
+        "SELECT id, source_term, target_term, notes FROM glossary_terms ORDER BY LOWER(source_term)",
     )
     .fetch_all(pool)
     .await
