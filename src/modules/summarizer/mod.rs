@@ -28,6 +28,7 @@ use crate::{
     config::SummarizerPrompts,
     escape_html, fetch_glossary_terms,
     llm::{ChatMessage, LlmRequest, MessageRole},
+    render_footer,
 };
 
 const STORAGE_ROOT: &str = "storage/summarizer";
@@ -59,86 +60,81 @@ async fn summarizer_page(
 ) -> Result<Html<String>, Redirect> {
     let user = require_user(&state, &jar).await?;
 
+    let footer = render_footer();
     let html = format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Summarizer & Translator</title>
+    <title>文档摘要与翻译 | 张圆教授课题组 AI 工具箱</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 0; background: #020617; color: #e2e8f0; }}
-        header {{ background: #0f172a; padding: 2rem 1.5rem; }}
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
+        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
         .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #38bdf8; text-decoration: none; font-weight: 600; background: rgba(56, 189, 248, 0.15); padding: 0.5rem 0.85rem; border-radius: 999px; border: 1px solid rgba(56, 189, 248, 0.3); transition: background 0.15s ease, border 0.15s ease; }}
-        .back-link:hover {{ background: rgba(14, 165, 233, 0.2); border-color: rgba(14, 165, 233, 0.4); }}
-        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
         section {{ margin-bottom: 2.5rem; }}
-        .panel {{ background: #0f172a; border-radius: 12px; padding: 1.5rem; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.35); }}
-        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; }}
-        input[type="file"], select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #334155; background: #020617; color: #e2e8f0; }}
+        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
+        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
+        input[type="file"], select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
+        input[type="file"]:focus, select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
         input[type="checkbox"] {{ margin-right: 0.5rem; }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #38bdf8; color: #020617; font-weight: bold; cursor: pointer; }}
-        button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; }}
-        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #1f2937; text-align: left; }}
-        th {{ background: #0f172a; }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
+        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
+        th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
         .status {{ margin-top: 1.5rem; }}
         .status p {{ margin: 0.25rem 0; }}
-        .jobs-list {{ margin-top: 2rem; }}
-        .downloads a {{ color: #38bdf8; text-decoration: none; margin-right: 1rem; }}
-        .note {{ color: #94a3b8; font-size: 0.95rem; }}
-        .drop-zone {{
-            border: 2px dashed #334155;
-            border-radius: 12px;
-            padding: 2rem;
-            text-align: center;
-            background: rgba(15, 23, 42, 0.4);
-            transition: border-color 0.2s ease, background 0.2s ease;
-            cursor: pointer;
-            margin-bottom: 1rem;
-        }}
-        .drop-zone.dragover {{
-            border-color: #38bdf8;
-            background: rgba(56, 189, 248, 0.15);
-        }}
-        .drop-zone strong {{ color: #38bdf8; }}
+        .note {{ color: #475569; font-size: 0.95rem; }}
+        .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
+        .downloads a:hover {{ text-decoration: underline; }}
+        .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
+        .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
+        .drop-zone strong {{ color: #1d4ed8; }}
         .drop-zone input[type="file"] {{ display: none; }}
-        .browse-link {{ color: #38bdf8; text-decoration: underline; }}
+        .browse-link {{ color: #2563eb; text-decoration: underline; }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
     </style>
 </head>
 <body>
     <header>
         <div class="header-bar">
-            <h1>Document Summarizer & Translator</h1>
-            <a class="back-link" href="/">← Back to main page</a>
+            <h1>文档摘要与翻译</h1>
+            <a class="back-link" href="/">← 返回首页</a>
         </div>
-        <p class="note">Signed in as <strong>{username}</strong>. Upload PDF, DOCX, or TXT files to generate summaries and optionally translate them to Chinese.</p>
+        <p class="note">当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 文件生成结构化摘要，并可输出中文译文。</p>
     </header>
     <main>
         <section class="panel">
-            <h2>Submit new job</h2>
+            <h2>发起新任务</h2>
             <form id="summarizer-form">
-                <label for="files">Upload documents</label>
+                <label for="files">上传文件</label>
                 <div id="drop-area" class="drop-zone">
-                    <p><strong>Drag and drop</strong> PDF, DOCX, or TXT files here or <span class="browse-link">browse</span>.</p>
-                    <p class="note">You can queue up to 10 documents per job.</p>
+                    <p><strong>拖拽文件</strong>到此处，或<span class="browse-link">点击选择</span>文件。</p>
+                    <p class="note">每个任务最多可提交 10 个文件。</p>
                     <input id="files" name="files" type="file" multiple accept=".pdf,.docx,.txt" required>
                 </div>
-                <label for="document-type">Document type</label>
+                <label for="document-type">文档类型</label>
                 <select id="document-type" name="document_type">
-                    <option value="research">Research article</option>
-                    <option value="other">Other document</option>
+                    <option value="research">科研论文</option>
+                    <option value="other">其他文档</option>
                 </select>
-                <label><input type="checkbox" name="translate" id="translate" checked> Generate Chinese translation</label>
-                <button type="submit">Start processing</button>
+                <label><input type="checkbox" name="translate" id="translate" checked> 生成中文译文</label>
+                <button type="submit">开始处理</button>
             </form>
             <div id="submission-status" class="status"></div>
         </section>
         <section class="panel jobs-list">
-            <h2>Job progress</h2>
+            <h2>任务进度</h2>
             <div id="job-status"></div>
         </section>
+        {footer}
     </main>
     <script>
         const form = document.getElementById('summarizer-form');
@@ -151,7 +147,7 @@ async fn summarizer_page(
 
         const updateSelectionStatus = () => {{
             if (fileInput.files.length > 0) {{
-                statusBox.textContent = `${{fileInput.files.length}} file(s) ready for upload.`;
+                statusBox.textContent = `已选择 ${{fileInput.files.length}} 个文件。`;
             }}
         }};
 
@@ -201,7 +197,7 @@ async fn summarizer_page(
 
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
-            statusBox.textContent = 'Uploading documents...';
+            statusBox.textContent = '正在上传文件...';
             const data = new FormData(form);
 
             try {{
@@ -211,18 +207,18 @@ async fn summarizer_page(
                 }});
 
                 if (!response.ok) {{
-                    const payload = await response.json().catch(() => ({{ message: 'Failed to submit job.' }}));
-                    statusBox.textContent = payload.message || 'Failed to submit job.';
+                    const payload = await response.json().catch(() => ({{ message: '任务提交失败。' }}));
+                    statusBox.textContent = payload.message || '任务提交失败。';
                     return;
                 }}
 
                 const payload = await response.json();
                 activeJobId = payload.job_id;
-                statusBox.textContent = 'Job queued. Monitoring progress...';
+                statusBox.textContent = '任务已入队，正在监控进度...';
                 pollStatus();
             }} catch (err) {{
                 console.error(err);
-                statusBox.textContent = 'Unexpected error submitting job.';
+                statusBox.textContent = '提交任务时发生异常。';
             }}
         }});
 
@@ -232,7 +228,7 @@ async fn summarizer_page(
             clearTimeout(statusTimer);
             fetch(`/api/summarizer/jobs/${{activeJobId}}`).then(async (response) => {{
                 if (!response.ok) {{
-                    jobStatus.innerHTML = '<p class="note">Unable to load job status. Please refresh.</p>';
+                    jobStatus.innerHTML = '<p class="note">无法加载任务状态，请刷新页面。</p>';
                     return;
                 }}
 
@@ -247,36 +243,49 @@ async fn summarizer_page(
                 statusTimer = setTimeout(pollStatus, 4000);
             }}).catch((err) => {{
                 console.error(err);
-                jobStatus.innerHTML = '<p class="note">Unable to load job status. Please refresh.</p>';
+                jobStatus.innerHTML = '<p class="note">无法加载任务状态，请刷新页面。</p>';
             }});
+        }}
+
+        function translateStatus(status) {{
+            const map = {{
+                pending: '待处理',
+                processing: '处理中',
+                completed: '已完成',
+                failed: '已失败',
+                queued: '排队中',
+            }};
+            return map[status] || status;
         }}
 
         function renderStatus(payload) {{
             let docRows = payload.documents.map((doc) => {{
-                const summaryLink = doc.summary_download_url ? `<a href="${{doc.summary_download_url}}">Summary</a>` : '';
-                const translationLink = doc.translation_download_url ? `<a href="${{doc.translation_download_url}}">Translation</a>` : '';
+                const summaryLink = doc.summary_download_url ? `<a href="${{doc.summary_download_url}}">摘要</a>` : '';
+                const translationLink = doc.translation_download_url ? `<a href="${{doc.translation_download_url}}">译文</a>` : '';
                 const downloads = summaryLink || translationLink ? `<div class="downloads">${{summaryLink}}${{translationLink}}</div>` : '';
                 const detail = doc.status_detail ? `<div class="note">${{doc.status_detail}}</div>` : '';
                 const error = doc.error_message ? `<div class="note">${{doc.error_message}}</div>` : '';
-                return `<tr><td>${{doc.original_filename}}</td><td>${{doc.status}}</td><td>${{downloads}}</td></tr>${{detail ? `<tr><td colspan=3>${{detail}}</td></tr>` : ''}}{{error ? `<tr><td colspan=3>${{error}}</td></tr>` : ''}}`;
+                const statusLabel = translateStatus(doc.status);
+                return `<tr><td>${{doc.original_filename}}</td><td>${{statusLabel}}</td><td>${{downloads}}</td></tr>${{detail ? `<tr><td colspan=3>${{detail}}</td></tr>` : ''}}{{error ? `<tr><td colspan=3>${{error}}</td></tr>` : ''}}`;
             }}).join('');
             if (!docRows) {{
-                docRows = '<tr><td colspan="3">No documents registered.</td></tr>';
+                docRows = '<tr><td colspan="3">暂无文件记录。</td></tr>';
             }}
 
-            const combinedSummary = payload.combined_summary_url ? `<a href="${{payload.combined_summary_url}}">Download combined summary</a>` : '';
-            const combinedTranslation = payload.combined_translation_url ? `<a href="${{payload.combined_translation_url}}">Download combined translation</a>` : '';
+            const combinedSummary = payload.combined_summary_url ? `<a href="${{payload.combined_summary_url}}">下载汇总摘要</a>` : '';
+            const combinedTranslation = payload.combined_translation_url ? `<a href="${{payload.combined_translation_url}}">下载汇总译文</a>` : '';
             const combinedBlock = combinedSummary || combinedTranslation ? `<p class="downloads">${{combinedSummary}} ${{combinedTranslation}}</p>` : '';
             const errorBlock = payload.error_message ? `<p class="note">${{payload.error_message}}</p>` : '';
             const detailBlock = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
+            const jobStatusLabel = translateStatus(payload.status);
 
             jobStatus.innerHTML = `
                 <div class="status">
-                    <p><strong>Status:</strong> ${{payload.status}}</p>
+                    <p><strong>任务状态：</strong> ${{jobStatusLabel}}</p>
                     ${{detailBlock}}
                     ${{errorBlock}}
                     <table>
-                        <thead><tr><th>Document</th><th>Status</th><th>Downloads</th></tr></thead>
+                        <thead><tr><th>文件名</th><th>状态</th><th>下载</th></tr></thead>
                         <tbody>${{docRows}}</tbody>
                     </table>
                     ${{combinedBlock}}
@@ -289,6 +298,7 @@ async fn summarizer_page(
         username = escape_html(&user.username),
         completed = STATUS_COMPLETED,
         failed = STATUS_FAILED,
+        footer = footer,
     );
 
     Ok(Html(html))
@@ -299,12 +309,9 @@ async fn create_job(
     jar: CookieJar,
     mut multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("Authentication required.")),
-        )
-    })?;
+    let user = require_user(&state, &jar)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
     let mut document_type = DocumentKind::ResearchArticle;
     let mut translate = true;
@@ -355,9 +362,7 @@ async fn create_job(
                 if !matches!(ext.as_str(), "pdf" | "docx" | "txt") {
                     return Err((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiError::new(
-                            "Only PDF, DOCX, and TXT files are supported.",
-                        )),
+                        Json(ApiError::new("仅支持上传 PDF、DOCX 和 TXT 文件。")),
                     ));
                 }
                 let stored_path = job_dir.join(format!("source_{file_index}_{safe_name}"));
@@ -389,14 +394,14 @@ async fn create_job(
     if files.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ApiError::new("Please upload at least one file.")),
+            Json(ApiError::new("请至少上传一个文件。")),
         ));
     }
 
     if files.len() > 10 {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ApiError::new("You can upload up to 10 files per job.")),
+            Json(ApiError::new("每个任务最多上传 10 个文件。")),
         ));
     }
 
@@ -406,7 +411,7 @@ async fn create_job(
             let _ = tokio_fs::remove_dir_all(&job_dir).await;
             return Err((
                 StatusCode::FORBIDDEN,
-                Json(ApiError::new("Usage limit exceeded for this account.")),
+                Json(ApiError::new("该账户已达到使用上限。")),
             ));
         }
     }
@@ -460,12 +465,9 @@ async fn job_status(
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
 ) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("Authentication required.")),
-        )
-    })?;
+    let user = require_user(&state, &jar)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
     let pool = state.pool();
 
@@ -479,14 +481,14 @@ async fn job_status(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("Job was not found or is no longer available.")),
+            Json(ApiError::new("未找到任务或任务已失效。")),
         )
     })?;
 
     if job.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("You do not have access to this job.")),
+            Json(ApiError::new("您无权访问该任务。")),
         ));
     }
 
@@ -546,12 +548,9 @@ async fn download_document_output(
     AxumPath(params): AxumPath<(Uuid, Uuid, String)>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     let (job_id, document_id, variant) = params;
-    let user = require_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("Authentication required.")),
-        )
-    })?;
+    let user = require_user(&state, &jar)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
     let pool = state.pool();
 
@@ -566,14 +565,14 @@ async fn download_document_output(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("Document output not found.")),
+            Json(ApiError::new("未找到对应的输出文件。")),
         )
     })?;
 
     if document.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("You do not have access to this output.")),
+            Json(ApiError::new("您无权下载该输出。")),
         ));
     }
 
@@ -583,7 +582,7 @@ async fn download_document_output(
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(ApiError::new("Summary file not yet available.")),
+                    Json(ApiError::new("摘要文件尚未生成。")),
                 )
             })
             .map(|path| (path, "summary"))?,
@@ -592,14 +591,14 @@ async fn download_document_output(
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(ApiError::new("Translation file not yet available.")),
+                    Json(ApiError::new("译文文件尚未生成。")),
                 )
             })
             .map(|path| (path, "translation"))?,
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new("Unknown download variant.")),
+                Json(ApiError::new("未知的下载类型。")),
             ));
         }
     };
@@ -614,12 +613,9 @@ async fn download_combined_output(
     jar: CookieJar,
     AxumPath((job_id, variant)): AxumPath<(Uuid, String)>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("Authentication required.")),
-        )
-    })?;
+    let user = require_user(&state, &jar)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
     let pool = state.pool();
 
@@ -633,14 +629,14 @@ async fn download_combined_output(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("Job was not found.")),
+            Json(ApiError::new("未找到任务。")),
         )
     })?;
 
     if job.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("You do not have access to this job.")),
+            Json(ApiError::new("您无权访问该任务。")),
         ));
     }
 
@@ -650,7 +646,7 @@ async fn download_combined_output(
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(ApiError::new("Combined summary not available.")),
+                    Json(ApiError::new("汇总摘要尚不可用。")),
                 )
             })
             .map(|path| (path, "combined-summary"))?,
@@ -659,14 +655,14 @@ async fn download_combined_output(
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(ApiError::new("Combined translation not available.")),
+                    Json(ApiError::new("汇总译文尚不可用。")),
                 )
             })
             .map(|path| (path, "combined-translation"))?,
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new("Unknown download variant.")),
+                Json(ApiError::new("未知的下载类型。")),
             ));
         }
     };
@@ -1390,7 +1386,7 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     error!(?err, "internal error in summarizer module");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError::new("Internal server error.")),
+        Json(ApiError::new("服务器内部错误。")),
     )
 }
 

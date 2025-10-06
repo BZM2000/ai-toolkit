@@ -10,12 +10,12 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use axum::{
     Router,
     extract::{Form, Query, State},
-    http::StatusCode,
-    response::{Html, Redirect},
+    http::{StatusCode, header},
+    response::{Html, IntoResponse, Redirect},
     routing::{get, post},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{Datelike, Duration as ChronoDuration, Utc};
 use cookie::time::Duration as CookieDuration;
 use dotenvy::dotenv;
 use rand_core::OsRng;
@@ -33,38 +33,52 @@ use crate::{
 
 pub(crate) const SESSION_COOKIE: &str = "auth_token";
 const SESSION_TTL_DAYS: i64 = 7;
-const LOGIN_PAGE_HTML: &str = r##"<!DOCTYPE html>
-<html lang="en">
+const ROBOTS_TXT_BODY: &str = include_str!("../robots.txt");
+fn render_login_page() -> String {
+    let footer = render_footer();
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Zhang Group AI Toolkit</title>
+    <title>张圆教授课题组 AI 工具箱</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
     <style>
-        body { font-family: Arial, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; }
-        main { width: 100%; display: flex; justify-content: center; }
-        .panel { background: #1e293b; padding: 2.5rem 2.25rem; border-radius: 16px; box-shadow: 0 24px 60px rgba(15, 23, 42, 0.5); width: min(420px, 92vw); }
-        h1 { margin: 0 0 1.5rem; font-size: 1.8rem; text-align: center; }
-        label { display: block; margin-top: 1.2rem; font-weight: 600; letter-spacing: 0.02em; }
-        input { width: 100%; padding: 0.85rem; margin-top: 0.65rem; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 1rem; }
-        button { margin-top: 2rem; width: 100%; padding: 0.95rem; border: none; border-radius: 10px; background: #38bdf8; color: #0f172a; font-weight: bold; font-size: 1.05rem; cursor: pointer; }
-        button:hover { background: #0ea5e9; }
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f1f5f9; color: #0f172a; }}
+        main {{ width: 100%; display: flex; justify-content: center; padding: 1.5rem; box-sizing: border-box; }}
+        .panel {{ background: #ffffff; padding: 2.5rem 2.25rem; border-radius: 18px; box-shadow: 0 20px 60px rgba(15, 23, 42, 0.08); width: min(420px, 92vw); border: 1px solid #e2e8f0; }}
+        h1 {{ margin: 0 0 1rem; font-size: 1.8rem; text-align: center; }}
+        p.description {{ margin: 0 0 1.75rem; color: #475569; text-align: center; font-size: 0.95rem; }}
+        label {{ display: block; margin-top: 1.2rem; font-weight: 600; letter-spacing: 0.01em; color: #0f172a; }}
+        input {{ width: 100%; padding: 0.85rem; margin-top: 0.65rem; border-radius: 10px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; font-size: 1rem; box-sizing: border-box; }}
+        input:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15); }}
+        button {{ margin-top: 2rem; width: 100%; padding: 0.95rem; border: none; border-radius: 10px; background: #2563eb; color: #ffffff; font-weight: 600; font-size: 1.05rem; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        .app-footer {{ margin-top: 2.5rem; text-align: center; font-size: 0.85rem; color: #64748b; }}
     </style>
 </head>
 <body>
     <main>
         <section class="panel">
-            <h1>Zhang Group AI Toolkit</h1>
+            <h1>张圆教授课题组 AI 工具箱</h1>
+            <p class="description">请输入管理员分配的账号与密码。</p>
             <form method="post" action="/login">
-                <label for="username">Username</label>
+                <label for="username">用户名</label>
                 <input id="username" name="username" required>
-                <label for="password">Password</label>
+                <label for="password">密码</label>
                 <input id="password" type="password" name="password" required>
-                <button type="submit">Sign in</button>
+                <button type="submit">登录</button>
             </form>
         </section>
+        {footer}
     </main>
 </body>
-</html>"##;
+</html>"#,
+        footer = footer,
+    )
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -178,6 +192,7 @@ async fn app_main() -> Result<()> {
         .route("/", get(landing_page))
         .route("/login", get(login_page).post(process_login))
         .route("/logout", post(logout))
+        .route("/robots.txt", get(robots_txt))
         .route("/dashboard", get(dashboard))
         .route("/dashboard/users", post(create_user))
         .route("/dashboard/users/password", post(update_user_password))
@@ -304,7 +319,7 @@ async fn landing_page(
     if let Some(user) = maybe_user {
         Html(render_main_page(&user, &params))
     } else {
-        Html(LOGIN_PAGE_HTML.to_string())
+        Html(render_login_page())
     }
 }
 
@@ -316,7 +331,7 @@ async fn login_page(
         return Err(redirect);
     }
 
-    Ok(Html(LOGIN_PAGE_HTML.to_string()))
+    Ok(Html(render_login_page()))
 }
 
 async fn redirect_if_authenticated(state: &AppState, jar: &CookieJar) -> Option<Redirect> {
@@ -403,6 +418,13 @@ async fn logout(State(state): State<AppState>, jar: CookieJar) -> (CookieJar, Re
     (jar, Redirect::to("/?status=logged_out"))
 }
 
+async fn robots_txt() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        ROBOTS_TXT_BODY,
+    )
+}
+
 async fn dashboard(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -442,14 +464,18 @@ async fn dashboard(
     let mut user_options = String::new();
 
     if users.is_empty() {
-        table_rows.push_str("<tr><td colspan=\"4\">No users provisioned yet.</td></tr>");
+        table_rows.push_str("<tr><td colspan=\"4\">当前还没有用户。</td></tr>");
     } else {
         for user in &users {
             let limit_display = user
                 .usage_limit
                 .map(|v| v.to_string())
-                .unwrap_or_else(|| "No limit".to_string());
-            let role = if user.is_admin { "Admin" } else { "Member" };
+                .unwrap_or_else(|| "不限".to_string());
+            let role = if user.is_admin {
+                "管理员"
+            } else {
+                "普通用户"
+            };
             let highlight = if user.username == auth_user.username {
                 " class=\"current-user\""
             } else {
@@ -475,7 +501,7 @@ async fn dashboard(
 
     let (user_options, reset_disabled_attr) = if user_options.is_empty() {
         (
-            "<option value=\"\" disabled selected>No users available</option>".to_string(),
+            "<option value=\"\" disabled selected>暂无可选用户</option>".to_string(),
             " disabled",
         )
     } else {
@@ -497,7 +523,7 @@ async fn dashboard(
         let mut glossary_select_options = String::new();
 
         if glossary_terms.is_empty() {
-            glossary_rows.push_str("<tr><td colspan=\"4\">No glossary entries yet.</td></tr>");
+            glossary_rows.push_str("<tr><td colspan=\"4\">尚未添加术语。</td></tr>");
         } else {
             for term in &glossary_terms {
                 let notes_display = term
@@ -508,9 +534,9 @@ async fn dashboard(
                     .unwrap_or_else(|| "—".to_string());
                 glossary_rows.push_str(&format!(
                     r#"<tr><td>{en}</td><td>{cn}</td><td>{notes}</td><td>
-    <form method="post" action="/dashboard/glossary/delete" onsubmit="return confirm('Remove this glossary term?');">
+    <form method="post" action="/dashboard/glossary/delete" onsubmit="return confirm('确定删除该术语？');">
         <input type="hidden" name="id" value="{id}">
-        <button type="submit" class="danger">Delete</button>
+        <button type="submit" class="danger">删除</button>
     </form>
 </td></tr>"#,
                     en = escape_html(&term.source_term),
@@ -520,7 +546,7 @@ async fn dashboard(
                 ));
 
                 glossary_select_options.push_str(&format!(
-                    "<option value=\"{id}\">EN: {en} -> CN: {cn}</option>",
+                    "<option value=\"{id}\">EN：{en} → CN：{cn}</option>",
                     id = term.id,
                     en = escape_html(&term.source_term),
                     cn = escape_html(&term.target_term)
@@ -528,25 +554,24 @@ async fn dashboard(
             }
         }
 
-        let (glossary_select_options, glossary_update_disabled_attr) = if glossary_select_options
-            .is_empty()
-        {
-            (
-                "<option value=\"\" disabled selected>No entries available</option>".to_string(),
-                " disabled",
-            )
-        } else {
-            (glossary_select_options, "")
-        };
+        let (glossary_select_options, glossary_update_disabled_attr) =
+            if glossary_select_options.is_empty() {
+                (
+                    "<option value=\"\" disabled selected>暂无可选术语</option>".to_string(),
+                    " disabled",
+                )
+            } else {
+                (glossary_select_options, "")
+            };
 
         let glossary_section = format!(
             r##"<section class="admin">
-    <h2>Glossary Management</h2>
-    <p class="section-note">Terms here feed the translation glossary for consistency.</p>
+    <h2>术语表管理</h2>
+    <p class="section-note">这些术语将用于翻译时的术语表以保持用词一致。</p>
     <div class="stack">
         <table class="glossary">
             <thead>
-                <tr><th>EN Term</th><th>CN Term</th><th>Notes</th><th>Actions</th></tr>
+                <tr><th>英文</th><th>中文</th><th>备注</th><th>操作</th></tr>
             </thead>
             <tbody>
                 {glossary_rows}
@@ -554,42 +579,42 @@ async fn dashboard(
         </table>
         <div class="glossary-forms">
             <form method="post" action="/dashboard/glossary">
-                <h3>Add Term</h3>
+                <h3>新增术语</h3>
                 <div class="field">
-                    <label for="glossary-source">EN term</label>
+                    <label for="glossary-source">英文术语</label>
                     <input id="glossary-source" name="source_term" required>
                 </div>
                 <div class="field">
-                    <label for="glossary-target">CN term</label>
+                    <label for="glossary-target">中文术语</label>
                     <input id="glossary-target" name="target_term" required>
                 </div>
                 <div class="field">
-                    <label for="glossary-notes">Notes (optional)</label>
-                    <input id="glossary-notes" name="notes" placeholder="Context or usage notes">
+                    <label for="glossary-notes">备注（可选）</label>
+                    <input id="glossary-notes" name="notes" placeholder="填写上下文或使用说明">
                 </div>
-                <button type="submit">Add term</button>
+                <button type="submit">保存术语</button>
             </form>
             <form method="post" action="/dashboard/glossary/update">
-                <h3>Update Term</h3>
+                <h3>更新术语</h3>
                 <div class="field">
-                    <label for="glossary-update-id">Select term</label>
+                    <label for="glossary-update-id">选择术语</label>
                     <select id="glossary-update-id" name="id" required{glossary_update_disabled_attr}>
                         {glossary_select_options}
                     </select>
                 </div>
                 <div class="field">
-                    <label for="glossary-update-source">Updated EN term</label>
+                    <label for="glossary-update-source">更新后的英文术语</label>
                     <input id="glossary-update-source" name="source_term" required{glossary_update_disabled_attr}>
                 </div>
                 <div class="field">
-                    <label for="glossary-update-target">Updated CN term</label>
+                    <label for="glossary-update-target">更新后的中文术语</label>
                     <input id="glossary-update-target" name="target_term" required{glossary_update_disabled_attr}>
                 </div>
                 <div class="field">
-                    <label for="glossary-update-notes">Notes (optional)</label>
-                    <input id="glossary-update-notes" name="notes" placeholder="Context or usage notes"{glossary_update_disabled_attr}>
+                    <label for="glossary-update-notes">备注（可选）</label>
+                    <input id="glossary-update-notes" name="notes" placeholder="填写上下文或使用说明"{glossary_update_disabled_attr}>
                 </div>
-                <button type="submit"{glossary_update_disabled_attr}>Save changes</button>
+                <button type="submit"{glossary_update_disabled_attr}>保存修改</button>
             </form>
         </div>
     </div>
@@ -601,40 +626,40 @@ async fn dashboard(
 
         let mut controls = format!(
             r##"<section class="admin">
-    <h2>Create User</h2>
+    <h2>创建用户</h2>
     <form method="post" action="/dashboard/users">
         <div class="field">
-            <label for="new-username">Username</label>
+            <label for="new-username">用户名</label>
             <input id="new-username" name="username" required>
         </div>
         <div class="field">
-            <label for="new-password">Password</label>
+            <label for="new-password">密码</label>
             <input id="new-password" type="password" name="password" required>
         </div>
         <div class="field">
-            <label for="usage-limit">Usage limit (leave blank for no limit)</label>
-            <input id="usage-limit" name="usage_limit" placeholder="e.g. 250">
+            <label for="usage-limit">调用上限（留空表示不限）</label>
+            <input id="usage-limit" name="usage_limit" placeholder="例如：250">
         </div>
         <div class="field checkbox">
-            <label><input type="checkbox" name="is_admin" value="on"> Grant admin access</label>
+            <label><input type="checkbox" name="is_admin" value="on"> 授予管理员权限</label>
         </div>
-        <button type="submit">Create user</button>
+        <button type="submit">创建用户</button>
     </form>
 </section>
 <section class="admin">
-    <h2>Reset Password</h2>
+    <h2>重置密码</h2>
     <form method="post" action="/dashboard/users/password">
         <div class="field">
-            <label for="reset-username">User</label>
+            <label for="reset-username">选择用户</label>
             <select id="reset-username" name="username" required{reset_disabled_attr}>
                 {user_options}
             </select>
         </div>
         <div class="field">
-            <label for="reset-password">New password</label>
+            <label for="reset-password">新密码</label>
             <input id="reset-password" type="password" name="password" required{reset_disabled_attr}>
         </div>
-        <button type="submit"{reset_disabled_attr}>Update password</button>
+        <button type="submit"{reset_disabled_attr}>更新密码</button>
     </form>
 </section>"##,
             user_options = user_options,
@@ -650,76 +675,85 @@ async fn dashboard(
     let mut model_notes = String::new();
     if let Some(models) = models_config.summarizer() {
         model_notes.push_str(&format!(
-            "<p class=\"meta-note\">Summaries use <code>{summary}</code>; translations use <code>{translation}</code>.</p>",
+            "<p class=\"meta-note\">摘要使用模型 <code>{summary}</code>，翻译使用模型 <code>{translation}</code>。</p>",
             summary = escape_html(models.summary_model()),
             translation = escape_html(models.translation_model())
         ));
     }
     if let Some(models) = models_config.translate_docx() {
         model_notes.push_str(&format!(
-            "<p class=\"meta-note\">DOCX translation runs on <code>{translation}</code>.</p>",
+            "<p class=\"meta-note\">DOCX 翻译使用模型 <code>{translation}</code>。</p>",
             translation = escape_html(models.translation_model())
         ));
     }
 
+    let footer = render_footer();
+
     let html = format!(
         r##"<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Admin Dashboard</title>
+    <title>管理后台</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 0; background: #020617; color: #e2e8f0; }}
-        header {{ background: #0f172a; padding: 2rem 1.5rem; }}
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
+        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
         .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #38bdf8; text-decoration: none; font-weight: 600; background: rgba(56, 189, 248, 0.15); padding: 0.5rem 0.85rem; border-radius: 999px; border: 1px solid rgba(56, 189, 248, 0.3); transition: background 0.15s ease, border 0.15s ease; }}
-        .back-link:hover {{ background: rgba(14, 165, 233, 0.2); border-color: rgba(14, 165, 233, 0.4); }}
-        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; }}
-        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #1f2937; text-align: left; }}
-        th {{ background: #0f172a; }}
-        a {{ color: #38bdf8; text-decoration: none; }}
-        .meta {{ margin-top: 1rem; font-size: 0.95rem; color: #94a3b8; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        main {{ padding: 2rem 1.5rem; max-width: 1100px; margin: 0 auto; box-sizing: border-box; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
+        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
+        th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
+        tr.current-user td {{ background: #eff6ff; }}
+        a {{ color: #2563eb; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        .meta {{ margin-top: 1.5rem; font-size: 0.95rem; color: #475569; }}
         .meta-note {{ margin-bottom: 0.5rem; }}
-        .flash {{ padding: 1rem; border-radius: 8px; margin-top: 1rem; }}
-        .flash.success {{ background: rgba(34, 197, 94, 0.15); color: #bbf7d0; border: 1px solid rgba(34, 197, 94, 0.4); }}
-        .flash.error {{ background: rgba(239, 68, 68, 0.15); color: #fecaca; border: 1px solid rgba(239, 68, 68, 0.4); }}
-        .admin {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #0f172a; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.35); }}
-        .admin h2 {{ margin-top: 0; color: #38bdf8; }}
-        .admin h3 {{ margin-top: 0; color: #38bdf8; font-size: 1.05rem; }}
+        .flash {{ padding: 1rem; border-radius: 8px; margin-top: 1rem; border: 1px solid transparent; }}
+        .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
+        .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
+        .admin {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #ffffff; border: 1px solid #e2e8f0; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
+        .admin h2 {{ margin-top: 0; color: #1d4ed8; }}
+        .admin h3 {{ margin-top: 0; color: #1d4ed8; font-size: 1.05rem; }}
         .field {{ margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }}
-        .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #334155; background: #020617; color: #e2e8f0; }}
+        .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; }}
+        .field input:focus, .field select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
         .field.checkbox {{ flex-direction: row; align-items: center; gap: 0.6rem; }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #38bdf8; color: #020617; font-weight: bold; cursor: pointer; }}
-        button.danger {{ background: rgba(239, 68, 68, 0.85); color: #fff; }}
-        button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
-        tr.current-user td {{ background: rgba(56, 189, 248, 0.15); }}
-        .section-note {{ margin-top: -0.5rem; margin-bottom: 1rem; color: #94a3b8; }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        button.danger {{ background: #ef4444; color: #ffffff; }}
+        button.danger:hover {{ background: #dc2626; }}
+        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+        .section-note {{ margin-top: -0.5rem; margin-bottom: 1rem; color: #64748b; }}
         .stack {{ display: flex; flex-direction: column; gap: 1.5rem; }}
         table.glossary {{ margin-top: 0; }}
         .glossary-forms {{ display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }}
-        .glossary-forms form {{ border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; background: #020617; box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.3); }}
-        .tools {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #0f172a; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.35); }}
-        .tools h2 {{ margin-top: 0; color: #38bdf8; }}
+        .glossary-forms form {{ border: 1px solid #e2e8f0; border-radius: 12px; padding: 1rem; background: #f8fafc; box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.1); }}
+        .tools {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #ffffff; border: 1px solid #e2e8f0; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
+        .tools h2 {{ margin-top: 0; color: #1d4ed8; }}
         .tools ul {{ list-style: none; margin: 0; padding: 0; }}
         .tools li {{ margin-bottom: 0.5rem; }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
     </style>
 </head>
 <body>
     <header>
         <div class="header-bar">
-            <h1>Usage Dashboard</h1>
-            <a class="back-link" href="/">← Back to main page</a>
+            <h1>使用情况仪表盘</h1>
+            <a class="back-link" href="/">← 返回首页</a>
         </div>
-        <p>Monitor account quotas and background activity at a glance.</p>
+        <p>快速查看各账号的额度与后台任务。</p>
     </header>
     <main>
-        <p data-user-id="{auth_user_id}">Signed in as <strong>{username}</strong>.</p>
+        <p data-user-id="{auth_user_id}">当前登录：<strong>{username}</strong>。</p>
         {message_block}
         <table>
             <thead>
-                <tr><th>User</th><th>Usage</th><th>Limit</th><th>Role</th></tr>
+                <tr><th>用户名</th><th>已用次数</th><th>调用上限</th><th>角色</th></tr>
             </thead>
             <tbody>
                 {table_rows}
@@ -727,16 +761,17 @@ async fn dashboard(
         </table>
         <div class="meta">
             {model_notes}
-            <p>Future enhancements: add user provisioning tools, logs, and real-time LLM activity streams.</p>
+            <p>后续计划：扩展用户管理、日志记录和实时 LLM 监控。</p>
         </div>
         <section class="tools">
-            <h2>Available Tools</h2>
+            <h2>可用工具</h2>
             <ul>
-                <li><a href="/tools/summarizer">Document Summarizer &amp; Translator</a></li>
-                <li><a href="/tools/translatedocx">DOCX Translator</a></li>
+                <li><a href="/tools/summarizer">文档摘要与翻译模块</a></li>
+                <li><a href="/tools/translatedocx">DOCX 文档翻译模块</a></li>
             </ul>
         </section>
         {admin_controls}
+        {footer}
     </main>
 </body>
 </html>"##,
@@ -745,7 +780,8 @@ async fn dashboard(
         message_block = message_block,
         table_rows = table_rows,
         admin_controls = admin_controls,
-        model_notes = model_notes
+        model_notes = model_notes,
+        footer = footer
     );
 
     Ok(Html(html))
@@ -1068,19 +1104,19 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
     if let Some(status) = params.status.as_deref() {
         match status {
             "created" => {
-                return "<div class=\"flash success\">User created successfully.</div>".to_string();
+                return "<div class=\"flash success\">已成功创建用户。</div>".to_string();
             }
             "password_updated" => {
-                return "<div class=\"flash success\">Password updated.</div>".to_string();
+                return "<div class=\"flash success\">已更新密码。</div>".to_string();
             }
             "glossary_created" => {
-                return "<div class=\"flash success\">Glossary term added.</div>".to_string();
+                return "<div class=\"flash success\">已新增术语。</div>".to_string();
             }
             "glossary_updated" => {
-                return "<div class=\"flash success\">Glossary term updated.</div>".to_string();
+                return "<div class=\"flash success\">已更新术语。</div>".to_string();
             }
             "glossary_deleted" => {
-                return "<div class=\"flash success\">Glossary term removed.</div>".to_string();
+                return "<div class=\"flash success\">已删除术语。</div>".to_string();
             }
             _ => {}
         }
@@ -1088,17 +1124,17 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
 
     if let Some(error) = params.error.as_deref() {
         let message = match error {
-            "duplicate" => "Username already exists.",
-            "not_authorized" => "Administrator privileges required.",
-            "missing_username" => "Username is required.",
-            "missing_password" => "Password is required.",
-            "password_missing" => "New password is required.",
-            "user_missing" => "User could not be found.",
-            "hash_failed" => "Failed to process password. Please retry.",
-            "glossary_missing_fields" => "Source and target terms are required.",
-            "glossary_duplicate" => "A glossary term with that source already exists.",
-            "glossary_not_found" => "Glossary term was not found.",
-            _ => "Unexpected error. Check logs for details.",
+            "duplicate" => "用户名已存在。",
+            "not_authorized" => "需要管理员权限。",
+            "missing_username" => "请输入用户名。",
+            "missing_password" => "请输入密码。",
+            "password_missing" => "请输入新密码。",
+            "user_missing" => "未找到该用户。",
+            "hash_failed" => "处理密码时出错，请重试。",
+            "glossary_missing_fields" => "请填写英文和中文术语。",
+            "glossary_duplicate" => "已存在相同英文术语。",
+            "glossary_not_found" => "未找到对应术语。",
+            _ => "发生未知错误，请查看日志。",
         };
 
         return format!("<div class=\"flash error\">{message}</div>");
@@ -1107,19 +1143,28 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
     String::new()
 }
 
+pub(crate) fn render_footer() -> String {
+    let current_year = Utc::now().year();
+    format!(
+        "<footer class=\"app-footer\">© 2024-{year} 张圆教授课题组，仅限内部使用</footer>",
+        year = current_year
+    )
+}
+
 fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
     let username = escape_html(&user.username);
     let flash = compose_landing_flash(params);
+    let footer = render_footer();
 
     let modules = [
         (
-            "Summarizer & Translator",
-            "Generate structured summaries and Chinese translations for uploaded documents.",
+            "文档摘要与翻译",
+            "上传 PDF、Word 或文本文件，生成结构化摘要并输出中文译文。",
             "/tools/summarizer",
         ),
         (
-            "DOCX Translator",
-            "Translate Word documents paragraph-by-paragraph with glossary guidance.",
+            "DOCX 文档翻译",
+            "上传 Word 文档，利用术语表逐段翻译。",
             "/tools/translatedocx",
         ),
     ];
@@ -1128,7 +1173,7 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
         .iter()
         .map(|(title, description, href)| {
             format!(
-                "<a class=\"module-card\" href=\"{href}\"><h2>{title}</h2><p>{description}</p><span class=\"cta\">Open module →</span></a>",
+                "<a class=\"module-card\" href=\"{href}\"><h2>{title}</h2><p>{description}</p><span class=\"cta\">进入工具 →</span></a>",
                 title = escape_html(title),
                 description = escape_html(description),
                 href = href,
@@ -1137,53 +1182,55 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
         .collect::<String>();
 
     let admin_button = if user.is_admin {
-        "<a class=\"admin-link\" href=\"/dashboard\">Admin dashboard</a>".to_string()
+        "<a class=\"admin-link\" href=\"/dashboard\">管理后台</a>".to_string()
     } else {
         String::new()
     };
 
     format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Zhang Group AI Toolkit</title>
+    <title>张圆教授课题组 AI 工具箱</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
     <style>
-        :root {{ color-scheme: dark; }}
-        body {{ font-family: Arial, sans-serif; margin: 0; background: #020617; color: #e2e8f0; min-height: 100vh; display: flex; flex-direction: column; }}
-        header {{ background: #0f172a; padding: clamp(2rem, 4vw, 2.75rem) clamp(1.5rem, 6vw, 3rem); display: flex; flex-direction: column; gap: 1rem; }}
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; min-height: 100vh; display: flex; flex-direction: column; }}
+        header {{ background: #ffffff; padding: clamp(2rem, 4vw, 2.75rem) clamp(1.5rem, 6vw, 3rem); display: flex; flex-direction: column; gap: 1rem; border-bottom: 1px solid #e2e8f0; }}
         .header-top {{ display: flex; flex-direction: column; gap: 0.5rem; }}
         .header-top h1 {{ margin: 0; font-size: clamp(1.9rem, 3vw, 2.4rem); }}
-        .header-top p {{ margin: 0; color: #94a3b8; }}
+        .header-top p {{ margin: 0; color: #64748b; }}
         .header-actions {{ display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; }}
-        .header-actions span {{ color: #cbd5f5; font-size: 0.95rem; }}
-        .logout-form button {{ padding: 0.6rem 1.2rem; border: none; border-radius: 999px; background: #38bdf8; color: #0f172a; font-weight: 600; cursor: pointer; }}
-        .logout-form button:hover {{ background: #0ea5e9; }}
-        main {{ flex: 1; padding: clamp(2rem, 5vw, 3rem); max-width: 1100px; margin: 0 auto; width: 100%; }}
-        .flash {{ padding: 1rem 1.25rem; border-radius: 10px; margin-bottom: 1.5rem; font-weight: 600; }}
-        .flash.success {{ background: rgba(34, 197, 94, 0.18); color: #bbf7d0; }}
-        .flash.error {{ background: rgba(248, 113, 113, 0.18); color: #fecaca; }}
+        .header-actions span {{ color: #475569; font-size: 0.95rem; }}
+        .logout-form button {{ padding: 0.6rem 1.3rem; border: none; border-radius: 999px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        .logout-form button:hover {{ background: #1d4ed8; }}
+        main {{ flex: 1; padding: clamp(2rem, 5vw, 3rem); max-width: 1100px; margin: 0 auto; width: 100%; box-sizing: border-box; }}
+        .flash {{ padding: 1rem 1.25rem; border-radius: 10px; margin-bottom: 1.5rem; font-weight: 600; border: 1px solid transparent; }}
+        .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
+        .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
         .modules-grid {{ display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }}
-        .module-card {{ display: block; background: #0f172a; padding: 1.75rem; border-radius: 16px; text-decoration: none; color: inherit; box-shadow: 0 16px 40px rgba(15, 23, 42, 0.3); transition: transform 0.15s ease, box-shadow 0.15s ease, border 0.15s ease; border: 1px solid rgba(148, 163, 184, 0.1); }}
-        .module-card:hover {{ transform: translateY(-4px); box-shadow: 0 24px 50px rgba(15, 23, 42, 0.4); border-color: rgba(56, 189, 248, 0.45); }}
+        .module-card {{ display: block; background: #ffffff; padding: 1.75rem; border-radius: 16px; text-decoration: none; color: inherit; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); transition: transform 0.15s ease, box-shadow 0.15s ease, border 0.15s ease; border: 1px solid #e2e8f0; }}
+        .module-card:hover {{ transform: translateY(-4px); box-shadow: 0 24px 55px rgba(15, 23, 42, 0.12); border-color: #bfdbfe; }}
         .module-card h2 {{ margin-top: 0; margin-bottom: 0.75rem; font-size: 1.25rem; }}
-        .module-card p {{ margin: 0 0 1.25rem 0; color: #cbd5f5; font-size: 0.95rem; line-height: 1.5; }}
-        .module-card .cta {{ font-weight: 600; color: #38bdf8; }}
-        .admin-link {{ display: inline-flex; align-items: center; justify-content: center; margin-top: 2.5rem; padding: 0.85rem 1.5rem; border-radius: 12px; background: rgba(56, 189, 248, 0.18); color: #38bdf8; text-decoration: none; font-weight: 600; border: 1px solid rgba(56, 189, 248, 0.35); transition: background 0.15s ease, border 0.15s ease; }}
-        .admin-link:hover {{ background: rgba(14, 165, 233, 0.25); border-color: rgba(14, 165, 233, 0.5); }}
+        .module-card p {{ margin: 0 0 1.25rem 0; color: #475569; font-size: 0.95rem; line-height: 1.6; }}
+        .module-card .cta {{ font-weight: 600; color: #2563eb; }}
+        .admin-link {{ display: inline-flex; align-items: center; justify-content: center; margin-top: 2.5rem; padding: 0.85rem 1.5rem; border-radius: 12px; background: #e0f2fe; color: #1d4ed8; text-decoration: none; font-weight: 600; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .admin-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
     </style>
 </head>
 <body>
     <header>
         <div class="header-top">
-            <h1>Zhang Group AI Toolkit</h1>
-            <p>Select a module to get started.</p>
+            <h1>张圆教授课题组 AI 工具箱</h1>
+            <p>请选择功能模块开始使用。</p>
         </div>
         <div class="header-actions">
-            <span>Signed in as <strong>{username}</strong></span>
+            <span>当前登录：<strong>{username}</strong></span>
             <form class="logout-form" method="post" action="/logout">
-                <button type="submit">Log out</button>
+                <button type="submit">退出登录</button>
             </form>
         </div>
     </header>
@@ -1193,6 +1240,7 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
             {module_cards}
         </div>
         {admin_button}
+        {footer}
     </main>
 </body>
 </html>"#,
@@ -1200,20 +1248,21 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
         flash = flash,
         module_cards = module_cards,
         admin_button = admin_button,
+        footer = footer,
     )
 }
 
 fn compose_landing_flash(params: &LandingQuery) -> String {
     if let Some(status) = params.status.as_deref() {
         if status == "logged_out" {
-            return "<div class=\"flash success\">You have been signed out.</div>".to_string();
+            return "<div class=\"flash success\">已退出登录。</div>".to_string();
         }
     }
 
     if let Some(error) = params.error.as_deref() {
         let message = match error {
-            "not_authorized" => "Administrator privileges are required for that action.",
-            _ => "Unexpected error. Please try again.",
+            "not_authorized" => "该操作需要管理员权限。",
+            _ => "发生未知错误，请稍后重试。",
         };
 
         return format!("<div class=\"flash error\">{message}</div>");
@@ -1226,7 +1275,7 @@ fn invalid_credentials() -> (StatusCode, Html<String>) {
     (
         StatusCode::UNAUTHORIZED,
         Html(
-            r##"<!DOCTYPE html><html lang=\"en\"><body><h3>Invalid credentials</h3><p><a href=\"/login\">Try again</a></p></body></html>"##
+            r##"<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"robots\" content=\"noindex,nofollow\"><title>登录失败</title></head><body><h3>账号或密码错误</h3><p><a href=\"/login\">返回登录</a></p></body></html>"##
                 .to_string(),
         ),
     )
@@ -1236,7 +1285,7 @@ fn server_error() -> (StatusCode, Html<String>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Html(
-            r##"<!DOCTYPE html><html lang=\"en\"><body><h3>Something went wrong</h3><p>Please try again later.</p></body></html>"##
+            r##"<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"robots\" content=\"noindex,nofollow\"><title>系统错误</title></head><body><h3>系统出现问题</h3><p>请稍后再试。</p></body></html>"##
                 .to_string(),
         ),
     )

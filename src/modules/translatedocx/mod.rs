@@ -28,6 +28,7 @@ use crate::{
     config::DocxTranslatorPrompts,
     escape_html, fetch_glossary_terms,
     llm::{ChatMessage, LlmRequest, MessageRole},
+    render_footer,
 };
 
 const STORAGE_ROOT: &str = "storage/translatedocx";
@@ -56,8 +57,8 @@ impl TranslationDirection {
 
     fn display_label(self) -> &'static str {
         match self {
-            TranslationDirection::EnToCn => "EN → CN",
-            TranslationDirection::CnToEn => "CN → EN",
+            TranslationDirection::EnToCn => "英文 → 中文",
+            TranslationDirection::CnToEn => "中文 → 英文",
         }
     }
 
@@ -90,82 +91,77 @@ async fn translatedocx_page(
 ) -> Result<Html<String>, Redirect> {
     let user = require_user(&state, &jar).await?;
 
+    let footer = render_footer();
     let html = format!(
         r#"<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>DOCX Translator</title>
+    <title>DOCX 文档翻译 | 张圆教授课题组 AI 工具箱</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 0; background: #020617; color: #e2e8f0; }}
-        header {{ background: #0f172a; padding: 2rem 1.5rem; }}
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
+        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
         .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #38bdf8; text-decoration: none; font-weight: 600; background: rgba(56, 189, 248, 0.15); padding: 0.5rem 0.85rem; border-radius: 999px; border: 1px solid rgba(56, 189, 248, 0.3); transition: background 0.15s ease, border 0.15s ease; }}
-        .back-link:hover {{ background: rgba(14, 165, 233, 0.2); border-color: rgba(14, 165, 233, 0.4); }}
-        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
         section {{ margin-bottom: 2.5rem; }}
-        .panel {{ background: #0f172a; border-radius: 12px; padding: 1.5rem; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.35); }}
-        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #38bdf8; color: #020617; font-weight: bold; cursor: pointer; }}
-        button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; }}
-        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #1f2937; text-align: left; }}
-        th {{ background: #0f172a; }}
+        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
+        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
+        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
+        th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
         .status {{ margin-top: 1.5rem; }}
         .status p {{ margin: 0.25rem 0; }}
-        .note {{ color: #94a3b8; font-size: 0.95rem; }}
-        .downloads a {{ color: #38bdf8; text-decoration: none; margin-right: 1rem; }}
-        .drop-zone {{
-            border: 2px dashed #334155;
-            border-radius: 12px;
-            padding: 2rem;
-            text-align: center;
-            background: rgba(15, 23, 42, 0.4);
-            transition: border-color 0.2s ease, background 0.2s ease;
-            cursor: pointer;
-            margin-bottom: 1rem;
-        }}
-        .drop-zone.dragover {{
-            border-color: #38bdf8;
-            background: rgba(56, 189, 248, 0.15);
-        }}
-        .drop-zone strong {{ color: #38bdf8; }}
+        .note {{ color: #475569; font-size: 0.95rem; }}
+        .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
+        .downloads a:hover {{ text-decoration: underline; }}
+        .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
+        .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
+        .drop-zone strong {{ color: #1d4ed8; }}
         .drop-zone input[type="file"] {{ display: none; }}
-        .browse-link {{ color: #38bdf8; text-decoration: underline; }}
+        .browse-link {{ color: #2563eb; text-decoration: underline; }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
     </style>
 </head>
 <body>
     <header>
         <div class="header-bar">
-            <h1>DOCX Translator</h1>
-            <a class="back-link" href="/">← Back to main page</a>
+            <h1>DOCX 文档翻译</h1>
+            <a class="back-link" href="/">← 返回首页</a>
         </div>
-        <p class="note">Signed in as <strong>{username}</strong>. Upload a DOCX file to translate it using the shared glossary.</p>
+        <p class="note">当前登录：<strong>{username}</strong>。上传 DOCX 文件，按照术语表进行精准翻译。</p>
     </header>
     <main>
         <section class="panel">
-            <h2>Submit new job</h2>
+            <h2>提交新任务</h2>
             <form id="translator-form">
-                <label for="files">Upload DOCX document</label>
+                <label for="files">上传 DOCX 文件</label>
                 <div id="drop-area" class="drop-zone">
-                    <p><strong>Drag and drop</strong> a DOCX file here or <span class="browse-link">browse</span>.</p>
-                    <p class="note">Only one document can be processed per job.</p>
+                    <p><strong>拖拽 DOCX 文件</strong>到此处，或<span class="browse-link">点击选择</span>文件。</p>
+                    <p class="note">本工具一次仅支持处理 1 个文件。</p>
                     <input id="files" name="files" type="file" accept=".docx" required>
                 </div>
-                <label for="direction">Translation direction</label>
+                <label for="direction">翻译方向</label>
                 <select id="direction" name="direction">
-                    <option value="en_to_cn">EN → CN</option>
-                    <option value="cn_to_en">CN → EN</option>
+                    <option value="en_to_cn">英文 → 中文</option>
+                    <option value="cn_to_en">中文 → 英文</option>
                 </select>
-                <button type="submit">Start translation</button>
+                <button type="submit">开始翻译</button>
             </form>
             <div id="submission-status" class="status"></div>
         </section>
         <section class="panel">
-            <h2>Job progress</h2>
+            <h2>任务进度</h2>
             <div id="job-status"></div>
         </section>
+        {footer}
     </main>
     <script>
         const form = document.getElementById('translator-form');
@@ -178,7 +174,7 @@ async fn translatedocx_page(
 
         const updateSelectionStatus = () => {{
             if (fileInput.files.length > 0) {{
-                statusBox.textContent = `${{fileInput.files.length}} file(s) ready for upload.`;
+                statusBox.textContent = `已选择 ${{fileInput.files.length}} 个文件。`;
             }} else {{
                 statusBox.textContent = '';
             }}
@@ -218,13 +214,13 @@ async fn translatedocx_page(
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
             if (!fileInput.files.length) {{
-                statusBox.textContent = 'Please select at least one DOCX file.';
+                statusBox.textContent = '请先选择 DOCX 文件。';
                 return;
             }}
 
             const directionValue = document.getElementById('direction').value;
-            const directionLabel = directionValue === 'cn_to_en' ? 'CN → EN' : 'EN → CN';
-            statusBox.textContent = `Uploading document for ${{directionLabel}} translation...`;
+            const directionLabel = directionValue === 'cn_to_en' ? '中文 → 英文' : '英文 → 中文';
+            statusBox.textContent = `正在上传文档（${{directionLabel}}）...`;
             const data = new FormData(form);
 
             try {{
@@ -235,16 +231,16 @@ async fn translatedocx_page(
 
                 if (!response.ok) {{
                     const payload = await response.json();
-                    statusBox.textContent = payload.message || 'Failed to create job.';
+                    statusBox.textContent = payload.message || '任务创建失败。';
                     return;
                 }}
 
                 const payload = await response.json();
                 activeJobId = payload.job_id;
-                statusBox.textContent = 'Job created. Monitoring progress...';
+                statusBox.textContent = '任务已创建，正在监控进度...';
                 pollStatus(payload.status_url);
             }} catch (error) {{
-                statusBox.textContent = 'Failed to submit job.';
+                statusBox.textContent = '提交任务失败。';
             }}
         }});
 
@@ -257,7 +253,7 @@ async fn translatedocx_page(
                 try {{
                     const response = await fetch(url);
                     if (!response.ok) {{
-                        jobStatus.textContent = 'Unable to load job status yet.';
+                        jobStatus.textContent = '暂时无法加载任务状态。';
                         return;
                     }}
                     const payload = await response.json();
@@ -267,12 +263,23 @@ async fn translatedocx_page(
                         clearInterval(statusTimer);
                     }}
                 }} catch (error) {{
-                    jobStatus.textContent = 'Unable to load job status yet.';
+                    jobStatus.textContent = '暂时无法加载任务状态。';
                 }}
             }};
 
             fetchStatus();
             statusTimer = setInterval(fetchStatus, 4000);
+        }}
+
+        function translateStatus(status) {{
+            const map = {{
+                pending: '待处理',
+                processing: '处理中',
+                completed: '已完成',
+                failed: '已失败',
+                queued: '排队中',
+            }};
+            return map[status] || status;
         }}
 
         function renderStatus(payload) {{
@@ -282,13 +289,14 @@ async fn translatedocx_page(
             }}
 
             let docRows = payload.documents.map((doc) => {{
-                const downloadLink = doc.translated_download_url ? `<a href="${{doc.translated_download_url}}">Download translated DOCX</a>` : 'Processing';
+                const downloadLink = doc.translated_download_url ? `<a href="${{doc.translated_download_url}}">下载译文 DOCX</a>` : '处理中';
                 const detailRow = doc.status_detail ? `<tr><td colspan="3"><div class="note">${{doc.status_detail}}</div></td></tr>` : '';
                 const errorRow = doc.error_message ? `<tr><td colspan="3"><div class="note">${{doc.error_message}}</div></td></tr>` : '';
+                const statusLabel = translateStatus(doc.status);
                 return `
                     <tr>
                         <td>${{doc.original_filename}}</td>
-                        <td>${{doc.status}}</td>
+                        <td>${{statusLabel}}</td>
                         <td class="downloads">${{downloadLink}}</td>
                     </tr>
                     ${{detailRow}}
@@ -296,21 +304,22 @@ async fn translatedocx_page(
                 `;
             }}).join('');
             if (!docRows) {{
-                docRows = '<tr><td colspan="3">No documents registered.</td></tr>';
+                docRows = '<tr><td colspan="3">暂无文件记录。</td></tr>';
             }}
 
-            const directionBlock = payload.translation_direction ? `<p class="note">Direction: ${{payload.translation_direction}}</p>` : '';
+            const directionBlock = payload.translation_direction ? `<p class="note">翻译方向：${{payload.translation_direction}}</p>` : '';
             const detailBlock = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
             const errorBlock = payload.error_message ? `<p class="note">${{payload.error_message}}</p>` : '';
+            const jobStatusLabel = translateStatus(payload.status);
 
             jobStatus.innerHTML = `
                 <div class="status">
-                    <p><strong>Status:</strong> ${{payload.status}}</p>
+                    <p><strong>任务状态：</strong> ${{jobStatusLabel}}</p>
                     ${{directionBlock}}
                     ${{detailBlock}}
                     ${{errorBlock}}
                     <table>
-                        <thead><tr><th>Document</th><th>Status</th><th>Download</th></tr></thead>
+                        <thead><tr><th>文件名</th><th>状态</th><th>下载</th></tr></thead>
                         <tbody>${{docRows}}</tbody>
                     </table>
                 </div>
@@ -322,6 +331,7 @@ async fn translatedocx_page(
         username = escape_html(&user.username),
         completed = STATUS_COMPLETED,
         failed = STATUS_FAILED,
+        footer = footer,
     );
 
     Ok(Html(html))
@@ -332,12 +342,9 @@ async fn create_job(
     jar: CookieJar,
     mut multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("Authentication required.")),
-        )
-    })?;
+    let user = require_user(&state, &jar)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
     ensure_storage_root()
         .await
@@ -370,7 +377,7 @@ async fn create_job(
                     let _ = tokio_fs::remove_dir_all(&job_dir).await;
                     return Err((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiError::new("Only one DOCX file can be uploaded per job.")),
+                        Json(ApiError::new("每个任务仅支持上传一个 DOCX 文件。")),
                     ));
                 }
                 let safe_name = sanitize(&filename);
@@ -382,7 +389,7 @@ async fn create_job(
                 if ext != "docx" {
                     return Err((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiError::new("Only DOCX files are supported.")),
+                        Json(ApiError::new("仅支持上传 DOCX 文件。")),
                     ));
                 }
 
@@ -422,7 +429,7 @@ async fn create_job(
         let _ = tokio_fs::remove_dir_all(&job_dir).await;
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ApiError::new("Please upload at least one DOCX file.")),
+            Json(ApiError::new("请上传一个 DOCX 文件。")),
         ));
     };
 
@@ -432,7 +439,7 @@ async fn create_job(
             let _ = tokio_fs::remove_dir_all(&job_dir).await;
             return Err((
                 StatusCode::FORBIDDEN,
-                Json(ApiError::new("Usage limit exceeded for this account.")),
+                Json(ApiError::new("该账户已达到使用上限。")),
             ));
         }
     }
@@ -484,12 +491,9 @@ async fn job_status(
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
 ) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("Authentication required.")),
-        )
-    })?;
+    let user = require_user(&state, &jar)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
     let pool = state.pool();
 
@@ -503,14 +507,14 @@ async fn job_status(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("Job not found.")),
+            Json(ApiError::new("未找到任务。")),
         )
     })?;
 
     if job.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("You do not have access to this job.")),
+            Json(ApiError::new("您无权访问该任务。")),
         ));
     }
 
@@ -567,12 +571,9 @@ async fn download_document_output(
         ));
     }
 
-    let user = require_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("Authentication required.")),
-        )
-    })?;
+    let user = require_user(&state, &jar)
+        .await
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
     let pool = state.pool();
     let document = sqlx::query_as::<_, DocumentDownloadRecord>(
@@ -600,7 +601,7 @@ async fn download_document_output(
     let path = document.translated_path.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("Translated file not yet available.")),
+            Json(ApiError::new("译文文件尚未生成。")),
         )
     })?;
 
@@ -1386,7 +1387,7 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     error!(?err, "internal error in docx translator module");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError::new("Internal server error.")),
+        Json(ApiError::new("服务器内部错误。")),
     )
 }
 
