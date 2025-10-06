@@ -1,0 +1,717 @@
+pub mod llm;
+
+use std::{env, net::SocketAddr};
+
+use anyhow::{Context, Result, anyhow};
+use argon2::Argon2;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use axum::{
+    Router,
+    extract::{Form, Query, State},
+    http::StatusCode,
+    response::{Html, Redirect},
+    routing::{get, post},
+};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use chrono::{Duration as ChronoDuration, Utc};
+use cookie::time::Duration as CookieDuration;
+use dotenvy::dotenv;
+use rand_core::OsRng;
+use serde::Deserialize;
+use sqlx::{PgPool, postgres::PgPoolOptions};
+use tokio::net::TcpListener;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
+
+const SESSION_COOKIE: &str = "auth_token";
+const SESSION_TTL_DAYS: i64 = 7;
+const LOGIN_PAGE_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Zhang Group AI Toolkit</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0; }
+        main { width: 100%; display: flex; justify-content: center; }
+        .panel { background: #1e293b; padding: 2.5rem 2.25rem; border-radius: 16px; box-shadow: 0 24px 60px rgba(15, 23, 42, 0.5); width: min(420px, 92vw); }
+        h1 { margin: 0 0 1.5rem; font-size: 1.8rem; text-align: center; }
+        label { display: block; margin-top: 1.2rem; font-weight: 600; letter-spacing: 0.02em; }
+        input { width: 100%; padding: 0.85rem; margin-top: 0.65rem; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; font-size: 1rem; }
+        button { margin-top: 2rem; width: 100%; padding: 0.95rem; border: none; border-radius: 10px; background: #38bdf8; color: #0f172a; font-weight: bold; font-size: 1.05rem; cursor: pointer; }
+        button:hover { background: #0ea5e9; }
+    </style>
+</head>
+<body>
+    <main>
+        <section class="panel">
+            <h1>Zhang Group AI Toolkit</h1>
+            <form method="post" action="/login">
+                <label for="username">Username</label>
+                <input id="username" name="username" required>
+                <label for="password">Password</label>
+                <input id="password" type="password" name="password" required>
+                <button type="submit">Sign in</button>
+            </form>
+        </section>
+    </main>
+</body>
+</html>"##;
+
+#[derive(Clone)]
+struct AppState {
+    pool: PgPool,
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    username: String,
+    password: String,
+}
+
+#[derive(Default, Deserialize)]
+struct DashboardQuery {
+    status: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateUserForm {
+    username: String,
+    password: String,
+    #[serde(default)]
+    usage_limit: Option<String>,
+    #[serde(default)]
+    is_admin: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdatePasswordForm {
+    username: String,
+    password: String,
+}
+
+#[derive(Clone, sqlx::FromRow)]
+struct DbUserAuth {
+    id: Uuid,
+    password_hash: String,
+}
+
+#[derive(Clone, sqlx::FromRow)]
+struct AuthUser {
+    id: Uuid,
+    username: String,
+    is_admin: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct DashboardUserRow {
+    username: String,
+    usage_count: i64,
+    usage_limit: Option<i64>,
+    is_admin: bool,
+}
+
+#[tokio::main]
+async fn main() {
+    dotenv().ok();
+    init_tracing();
+
+    if let Err(err) = app_main().await {
+        error!(?err, "application error");
+        std::process::exit(1);
+    }
+}
+
+async fn app_main() -> Result<()> {
+    let state = AppState::new().await?;
+    state.ensure_seed_admin().await?;
+
+    let app = Router::new()
+        .route("/", get(landing_page))
+        .route("/login", get(login_page).post(process_login))
+        .route("/dashboard", get(dashboard))
+        .route("/dashboard/users", post(create_user))
+        .route("/dashboard/users/password", post(update_user_password))
+        .with_state(state);
+
+    let port: u16 = env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    info!(%addr, "listening");
+
+    let listener = TcpListener::bind(addr)
+        .await
+        .context("failed to bind listener")?;
+    axum::serve(listener, app).await.context("server error")?;
+
+    Ok(())
+}
+
+impl AppState {
+    async fn new() -> Result<Self> {
+        let database_url = env::var("DATABASE_URL").context("DATABASE_URL env var is missing")?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .connect(&database_url)
+            .await
+            .context("failed to connect to Postgres")?;
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .context("failed to run database migrations")?;
+
+        Ok(Self { pool })
+    }
+
+    async fn ensure_seed_admin(&self) -> Result<()> {
+        let has_admin: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE is_admin = TRUE)")
+                .fetch_one(&self.pool)
+                .await
+                .context("failed to verify admin presence")?;
+
+        if !has_admin {
+            let password_hash = hash_password("change-me")
+                .map_err(|err| anyhow!("failed to hash seed admin password: {err}"))?;
+
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, usage_limit, is_admin) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind("demo-admin")
+            .bind(password_hash)
+            .bind(Some(100_i64))
+            .bind(true)
+            .execute(&self.pool)
+            .await
+            .context("failed to insert seed admin user")?;
+
+            info!(
+                "Seeded default admin user 'demo-admin' (password: 'change-me'). Update it promptly."
+            );
+        }
+
+        Ok(())
+    }
+}
+
+async fn landing_page(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Html<&'static str>, Redirect> {
+    if let Some(redirect) = redirect_if_authenticated(&state, &jar).await {
+        return Err(redirect);
+    }
+
+    Ok(Html(LOGIN_PAGE_HTML))
+}
+
+async fn login_page(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Html<&'static str>, Redirect> {
+    if let Some(redirect) = redirect_if_authenticated(&state, &jar).await {
+        return Err(redirect);
+    }
+
+    Ok(Html(LOGIN_PAGE_HTML))
+}
+
+async fn redirect_if_authenticated(state: &AppState, jar: &CookieJar) -> Option<Redirect> {
+    let token_cookie = jar.get(SESSION_COOKIE)?;
+    let token = Uuid::parse_str(token_cookie.value()).ok()?;
+
+    match fetch_user_by_session(&state.pool, token).await {
+        Ok(Some(_)) => Some(Redirect::to("/dashboard")),
+        Ok(None) => None,
+        Err(err) => {
+            error!(?err, "failed to validate session for access gate");
+            None
+        }
+    }
+}
+
+async fn process_login(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<LoginForm>,
+) -> Result<(CookieJar, Redirect), (StatusCode, Html<String>)> {
+    let username = form.username.trim();
+
+    let user = match fetch_user_by_username(&state.pool, username).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(invalid_credentials()),
+        Err(err) => {
+            error!(?err, "failed to fetch user during login");
+            return Err(server_error());
+        }
+    };
+
+    if !verify_password(&form.password, &user.password_hash) {
+        return Err(invalid_credentials());
+    }
+
+    let session_token = Uuid::new_v4();
+    let expires_at = Utc::now() + ChronoDuration::days(SESSION_TTL_DAYS);
+
+    if let Err(err) =
+        sqlx::query("INSERT INTO sessions (id, user_id, expires_at) VALUES ($1, $2, $3)")
+            .bind(session_token)
+            .bind(user.id)
+            .bind(expires_at)
+            .execute(&state.pool)
+            .await
+    {
+        error!(?err, "failed to create session");
+        return Err(server_error());
+    }
+
+    let mut cookie = Cookie::new(SESSION_COOKIE, session_token.to_string());
+    cookie.set_path("/");
+    cookie.set_http_only(true);
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_max_age(CookieDuration::days(SESSION_TTL_DAYS));
+
+    let jar = jar.add(cookie);
+    Ok((jar, Redirect::to("/dashboard")))
+}
+
+async fn dashboard(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(params): Query<DashboardQuery>,
+) -> Result<Html<String>, Redirect> {
+    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
+        return Err(Redirect::to("/login"));
+    };
+
+    let token = match Uuid::parse_str(token_cookie.value()) {
+        Ok(token) => token,
+        Err(_) => return Err(Redirect::to("/login")),
+    };
+
+    let auth_user = match fetch_user_by_session(&state.pool, token).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(Redirect::to("/login")),
+        Err(err) => {
+            error!(?err, "failed to fetch session user");
+            return Err(Redirect::to("/login"));
+        }
+    };
+
+    let users = match fetch_dashboard_users(&state.pool).await {
+        Ok(list) => list,
+        Err(err) => {
+            error!(?err, "failed to load dashboard users");
+            return Err(Redirect::to("/login"));
+        }
+    };
+
+    let mut table_rows = String::new();
+    let mut user_options = String::new();
+
+    if users.is_empty() {
+        table_rows.push_str("<tr><td colspan=\"4\">No users provisioned yet.</td></tr>");
+    } else {
+        for user in &users {
+            let limit_display = user
+                .usage_limit
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "No limit".to_string());
+            let role = if user.is_admin { "Admin" } else { "Member" };
+            let highlight = if user.username == auth_user.username {
+                " class=\"current-user\""
+            } else {
+                ""
+            };
+
+            table_rows.push_str(&format!(
+                "<tr{highlight}><td>{name}</td><td>{count}</td><td>{limit}</td><td>{role}</td></tr>",
+                name = escape_html(&user.username),
+                count = user.usage_count,
+                limit = limit_display,
+                role = role,
+                highlight = highlight
+            ));
+
+            user_options.push_str(&format!(
+                "<option value=\"{value}\">{label}</option>",
+                value = escape_html(&user.username),
+                label = escape_html(&user.username)
+            ));
+        }
+    }
+
+    let (user_options, reset_disabled_attr) = if user_options.is_empty() {
+        (
+            "<option value=\"\" disabled selected>No users available</option>".to_string(),
+            " disabled",
+        )
+    } else {
+        (user_options, "")
+    };
+
+    let message_block = compose_flash_message(&params);
+
+    let admin_controls = if auth_user.is_admin {
+        format!(
+            r##"<section class="admin">
+    <h2>Create User</h2>
+    <form method="post" action="/dashboard/users">
+        <div class="field">
+            <label for="new-username">Username</label>
+            <input id="new-username" name="username" required>
+        </div>
+        <div class="field">
+            <label for="new-password">Password</label>
+            <input id="new-password" type="password" name="password" required>
+        </div>
+        <div class="field">
+            <label for="usage-limit">Usage limit (leave blank for no limit)</label>
+            <input id="usage-limit" name="usage_limit" placeholder="e.g. 250">
+        </div>
+        <div class="field checkbox">
+            <label><input type="checkbox" name="is_admin" value="on"> Grant admin access</label>
+        </div>
+        <button type="submit">Create user</button>
+    </form>
+</section>
+<section class="admin">
+    <h2>Reset Password</h2>
+    <form method="post" action="/dashboard/users/password">
+        <div class="field">
+            <label for="reset-username">User</label>
+            <select id="reset-username" name="username" required{reset_disabled_attr}>
+                {user_options}
+            </select>
+        </div>
+        <div class="field">
+            <label for="reset-password">New password</label>
+            <input id="reset-password" type="password" name="password" required{reset_disabled_attr}>
+        </div>
+        <button type="submit"{reset_disabled_attr}>Update password</button>
+    </form>
+</section>"##,
+            user_options = user_options,
+            reset_disabled_attr = reset_disabled_attr
+        )
+    } else {
+        String::new()
+    };
+
+    let html = format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Admin Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 0; background: #020617; color: #e2e8f0; }}
+        header {{ background: #0f172a; padding: 2rem 1.5rem; }}
+        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; }}
+        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #1f2937; text-align: left; }}
+        th {{ background: #0f172a; }}
+        a {{ color: #38bdf8; text-decoration: none; }}
+        .meta {{ margin-top: 1rem; font-size: 0.95rem; color: #94a3b8; }}
+        .flash {{ padding: 1rem; border-radius: 8px; margin-top: 1rem; }}
+        .flash.success {{ background: rgba(34, 197, 94, 0.15); color: #bbf7d0; border: 1px solid rgba(34, 197, 94, 0.4); }}
+        .flash.error {{ background: rgba(239, 68, 68, 0.15); color: #fecaca; border: 1px solid rgba(239, 68, 68, 0.4); }}
+        .admin {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #0f172a; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.35); }}
+        .admin h2 {{ margin-top: 0; color: #38bdf8; }}
+        .field {{ margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }}
+        .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #334155; background: #020617; color: #e2e8f0; }}
+        .field.checkbox {{ flex-direction: row; align-items: center; gap: 0.6rem; }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #38bdf8; color: #020617; font-weight: bold; cursor: pointer; }}
+        tr.current-user td {{ background: rgba(56, 189, 248, 0.15); }}
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Usage Dashboard</h1>
+        <p>Monitor account quotas and background activity at a glance.</p>
+    </header>
+    <main>
+        <p data-user-id="{auth_user_id}">Signed in as <strong>{username}</strong>. <a href="/">View landing page</a></p>
+        {message_block}
+        <table>
+            <thead>
+                <tr><th>User</th><th>Usage</th><th>Limit</th><th>Role</th></tr>
+            </thead>
+            <tbody>
+                {table_rows}
+            </tbody>
+        </table>
+        <div class="meta">
+            <p>Future enhancements: add user provisioning tools, logs, and real-time LLM activity streams.</p>
+        </div>
+        {admin_controls}
+    </main>
+</body>
+</html>"##,
+        username = escape_html(&auth_user.username),
+        auth_user_id = auth_user.id,
+        message_block = message_block,
+        table_rows = table_rows,
+        admin_controls = admin_controls
+    );
+
+    Ok(Html(html))
+}
+
+async fn create_user(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<CreateUserForm>,
+) -> Result<Redirect, Redirect> {
+    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
+        return Err(Redirect::to("/login"));
+    };
+
+    let token = match Uuid::parse_str(token_cookie.value()) {
+        Ok(token) => token,
+        Err(_) => return Err(Redirect::to("/login")),
+    };
+
+    let auth_user = match fetch_user_by_session(&state.pool, token).await {
+        Ok(Some(user)) => user,
+        _ => return Err(Redirect::to("/login")),
+    };
+
+    if !auth_user.is_admin {
+        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+    }
+
+    let username = form.username.trim();
+    if username.is_empty() {
+        return Ok(Redirect::to("/dashboard?error=missing_username"));
+    }
+
+    if form.password.trim().is_empty() {
+        return Ok(Redirect::to("/dashboard?error=missing_password"));
+    }
+
+    let usage_limit: Option<i64> = form.usage_limit.as_ref().and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            trimmed.parse::<i64>().ok()
+        }
+    });
+
+    let password_hash = match hash_password(form.password.trim()) {
+        Ok(hash) => hash,
+        Err(err) => {
+            error!(?err, "failed to hash password when creating user");
+            return Ok(Redirect::to("/dashboard?error=hash_failed"));
+        }
+    };
+
+    let is_admin = form.is_admin.is_some();
+
+    let insert_result = sqlx::query(
+        "INSERT INTO users (id, username, password_hash, usage_limit, is_admin) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(username)
+    .bind(password_hash)
+    .bind(usage_limit)
+    .bind(is_admin)
+    .execute(&state.pool)
+    .await;
+
+    match insert_result {
+        Ok(_) => Ok(Redirect::to("/dashboard?status=created")),
+        Err(sqlx::Error::Database(db_err)) if db_err.constraint() == Some("users_username_key") => {
+            Ok(Redirect::to("/dashboard?error=duplicate"))
+        }
+        Err(err) => {
+            error!(?err, "failed to insert new user");
+            Ok(Redirect::to("/dashboard?error=unknown"))
+        }
+    }
+}
+
+async fn update_user_password(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<UpdatePasswordForm>,
+) -> Result<Redirect, Redirect> {
+    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
+        return Err(Redirect::to("/login"));
+    };
+
+    let token = match Uuid::parse_str(token_cookie.value()) {
+        Ok(token) => token,
+        Err(_) => return Err(Redirect::to("/login")),
+    };
+
+    let auth_user = match fetch_user_by_session(&state.pool, token).await {
+        Ok(Some(user)) => user,
+        _ => return Err(Redirect::to("/login")),
+    };
+
+    if !auth_user.is_admin {
+        return Ok(Redirect::to("/dashboard?error=not_authorized"));
+    }
+
+    let username = form.username.trim();
+    if username.is_empty() {
+        return Ok(Redirect::to("/dashboard?error=user_missing"));
+    }
+
+    let new_password = form.password.trim();
+    if new_password.is_empty() {
+        return Ok(Redirect::to("/dashboard?error=password_missing"));
+    }
+
+    let password_hash = match hash_password(new_password) {
+        Ok(hash) => hash,
+        Err(err) => {
+            error!(?err, "failed to hash password during reset");
+            return Ok(Redirect::to("/dashboard?error=hash_failed"));
+        }
+    };
+
+    match sqlx::query("UPDATE users SET password_hash = $2 WHERE username = $1")
+        .bind(username)
+        .bind(password_hash)
+        .execute(&state.pool)
+        .await
+    {
+        Ok(result) if result.rows_affected() > 0 => {
+            Ok(Redirect::to("/dashboard?status=password_updated"))
+        }
+        Ok(_) => Ok(Redirect::to("/dashboard?error=user_missing")),
+        Err(err) => {
+            error!(?err, "failed to update user password");
+            Ok(Redirect::to("/dashboard?error=unknown"))
+        }
+    }
+}
+
+fn compose_flash_message(params: &DashboardQuery) -> String {
+    if let Some(status) = params.status.as_deref() {
+        match status {
+            "created" => {
+                return "<div class=\"flash success\">User created successfully.</div>".to_string();
+            }
+            "password_updated" => {
+                return "<div class=\"flash success\">Password updated.</div>".to_string();
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(error) = params.error.as_deref() {
+        let message = match error {
+            "duplicate" => "Username already exists.",
+            "not_authorized" => "Only administrators can create new users.",
+            "missing_username" => "Username is required.",
+            "missing_password" => "Password is required.",
+            "password_missing" => "New password is required.",
+            "user_missing" => "User could not be found.",
+            "hash_failed" => "Failed to process password. Please retry.",
+            _ => "Unexpected error. Check logs for details.",
+        };
+
+        return format!("<div class=\"flash error\">{message}</div>");
+    }
+
+    String::new()
+}
+
+fn invalid_credentials() -> (StatusCode, Html<String>) {
+    (
+        StatusCode::UNAUTHORIZED,
+        Html(
+            r##"<!DOCTYPE html><html lang=\"en\"><body><h3>Invalid credentials</h3><p><a href=\"/login\">Try again</a></p></body></html>"##
+                .to_string(),
+        ),
+    )
+}
+
+fn server_error() -> (StatusCode, Html<String>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Html(
+            r##"<!DOCTYPE html><html lang=\"en\"><body><h3>Something went wrong</h3><p>Please try again later.</p></body></html>"##
+                .to_string(),
+        ),
+    )
+}
+
+fn hash_password(password: &str) -> Result<String, argon2::password_hash::Error> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let password_hash = argon2.hash_password(password.as_bytes(), &salt)?;
+    Ok(password_hash.to_string())
+}
+
+fn verify_password(password: &str, password_hash: &str) -> bool {
+    let parsed_hash = match PasswordHash::new(password_hash) {
+        Ok(hash) => hash,
+        Err(_) => return false,
+    };
+
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok()
+}
+
+fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+async fn fetch_user_by_username(pool: &PgPool, username: &str) -> sqlx::Result<Option<DbUserAuth>> {
+    sqlx::query_as::<_, DbUserAuth>("SELECT id, password_hash FROM users WHERE username = $1")
+        .bind(username)
+        .fetch_optional(pool)
+        .await
+}
+
+async fn fetch_user_by_session(pool: &PgPool, token: Uuid) -> sqlx::Result<Option<AuthUser>> {
+    sqlx::query_as::<_, AuthUser>(
+        "SELECT users.id, users.username, users.is_admin FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn fetch_dashboard_users(pool: &PgPool) -> sqlx::Result<Vec<DashboardUserRow>> {
+    sqlx::query_as::<_, DashboardUserRow>(
+        "SELECT username, usage_count, usage_limit, is_admin FROM users ORDER BY username",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+fn init_tracing() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_target(false)
+        .compact()
+        .init();
+}
