@@ -24,7 +24,9 @@ use uuid::Uuid;
 use zip::ZipArchive;
 
 use crate::{
-    AppState, GlossaryTermRow, escape_html, fetch_glossary_terms,
+    AppState, GlossaryTermRow,
+    config::SummarizerPrompts,
+    escape_html, fetch_glossary_terms,
     llm::{ChatMessage, LlmRequest, MessageRole},
 };
 
@@ -34,9 +36,7 @@ const STATUS_PROCESSING: &str = "processing";
 const STATUS_COMPLETED: &str = "completed";
 const STATUS_FAILED: &str = "failed";
 
-const RESEARCH_SUMMARY_PROMPT: &str = "You are an academic assistant. Write a detailed summary of the following research paper text. The summary should be approximately 800 words and cover these sections clearly:\n1. **Research Question/Objective:** State the main question or goal (~75 words).\n2. **Methodology:** Describe the methods, data collection, analysis techniques, tools, and participant/sample information (~400 words). Include specific details and quantitative information where available.\n3. **Findings/Results:** Present the key findings and results, including significant data points, statistical outcomes, or main observations (~400 words). Be specific and quantitative.\n4. **Discussion/Conclusion:** Briefly discuss the implications of the findings and the main conclusion (~75 words).\nStructure the output clearly. Do not use markdown formatting. Focus on factual reporting based only on the provided text.";
-
-const GENERAL_SUMMARY_PROMPT: &str = "You are an assistant tasked with summarizing documents. Provide a concise yet comprehensive summary of the following text, aiming for approximately 600 words. Highlight the main points, key arguments, significant data or figures mentioned, and any conclusions drawn. Include specific quantitative details if they are present and relevant to the core message. Structure the summary logically. Do not use markdown formatting. Base the summary only on the provided text.";
+const GLOSSARY_PLACEHOLDER: &str = "{{GLOSSARY}}";
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -85,6 +85,23 @@ async fn summarizer_page(
         .jobs-list {{ margin-top: 2rem; }}
         .downloads a {{ color: #38bdf8; text-decoration: none; margin-right: 1rem; }}
         .note {{ color: #94a3b8; font-size: 0.95rem; }}
+        .drop-zone {{
+            border: 2px dashed #334155;
+            border-radius: 12px;
+            padding: 2rem;
+            text-align: center;
+            background: rgba(15, 23, 42, 0.4);
+            transition: border-color 0.2s ease, background 0.2s ease;
+            cursor: pointer;
+            margin-bottom: 1rem;
+        }}
+        .drop-zone.dragover {{
+            border-color: #38bdf8;
+            background: rgba(56, 189, 248, 0.15);
+        }}
+        .drop-zone strong {{ color: #38bdf8; }}
+        .drop-zone input[type="file"] {{ display: none; }}
+        .browse-link {{ color: #38bdf8; text-decoration: underline; }}
     </style>
 </head>
 <body>
@@ -97,7 +114,11 @@ async fn summarizer_page(
             <h2>Submit new job</h2>
             <form id="summarizer-form">
                 <label for="files">Upload documents</label>
-                <input id="files" name="files" type="file" multiple accept=".pdf,.docx,.txt" required>
+                <div id="drop-area" class="drop-zone">
+                    <p><strong>Drag and drop</strong> PDF, DOCX, or TXT files here or <span class="browse-link">browse</span>.</p>
+                    <p class="note">You can queue up to 10 documents per job.</p>
+                    <input id="files" name="files" type="file" multiple accept=".pdf,.docx,.txt" required>
+                </div>
                 <label for="document-type">Document type</label>
                 <select id="document-type" name="document_type">
                     <option value="research">Research article</option>
@@ -117,8 +138,60 @@ async fn summarizer_page(
         const form = document.getElementById('summarizer-form');
         const statusBox = document.getElementById('submission-status');
         const jobStatus = document.getElementById('job-status');
+        const dropArea = document.getElementById('drop-area');
+        const fileInput = document.getElementById('files');
         let activeJobId = null;
         let statusTimer = null;
+
+        const updateSelectionStatus = () => {{
+            if (fileInput.files.length > 0) {{
+                statusBox.textContent = `${{fileInput.files.length}} file(s) ready for upload.`;
+            }}
+        }};
+
+        const handleFiles = (list) => {{
+            if (!list || !list.length) {{
+                return;
+            }}
+
+            const dt = new DataTransfer();
+            for (const file of list) {{
+                dt.items.add(file);
+            }}
+            fileInput.files = dt.files;
+            updateSelectionStatus();
+        }};
+
+        fileInput.addEventListener('change', () => {{
+            updateSelectionStatus();
+        }});
+
+        dropArea.addEventListener('click', () => {{
+            fileInput.click();
+        }});
+
+        dropArea.addEventListener('dragenter', (event) => {{
+            event.preventDefault();
+            dropArea.classList.add('dragover');
+        }});
+
+        dropArea.addEventListener('dragover', (event) => {{
+            event.preventDefault();
+        }});
+
+        dropArea.addEventListener('dragleave', (event) => {{
+            event.preventDefault();
+            const related = event.relatedTarget;
+            if (!related || !dropArea.contains(related)) {{
+                dropArea.classList.remove('dragover');
+            }}
+        }});
+
+        dropArea.addEventListener('drop', (event) => {{
+            event.preventDefault();
+            dropArea.classList.remove('dragover');
+            handleFiles(event.dataTransfer.files);
+        }});
 
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
@@ -597,30 +670,38 @@ async fn download_combined_output(
         .map_err(|err| internal_error(err.into()))
 }
 
-fn build_translation_prompt(glossary: &[GlossaryTermRow]) -> String {
-    if glossary.is_empty() {
-        return "You are an expert translator for academic manuscripts from English to Chinese. Use formal academic Chinese, maintain tone and style, and preserve citations.".to_string();
-    }
+fn build_translation_prompt(prompts: &SummarizerPrompts, glossary: &[GlossaryTermRow]) -> String {
+    let glossary_block = glossary
+        .iter()
+        .map(|term| {
+            format!(
+                "- EN: {} -> CN: {}",
+                term.source_term.trim(),
+                term.target_term.trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
-    let mut entries = String::new();
-    for term in glossary {
-        entries.push_str(&format!(
-            "- {} => {}\n",
-            term.source_term.trim(),
-            term.target_term.trim()
-        ));
-    }
+    let substitution = if glossary_block.is_empty() {
+        "- (no glossary terms configured)".to_string()
+    } else {
+        glossary_block
+    };
 
-    format!(
-        "You are an expert translator for academic manuscripts from English to Chinese. Maintain academic tone and style. Use the following glossary for consistent terminology:\n{}Preserve citations, references, and technical terms.",
-        entries
-    )
+    if prompts.translation.contains(GLOSSARY_PLACEHOLDER) {
+        prompts
+            .translation
+            .replace(GLOSSARY_PLACEHOLDER, &substitution)
+    } else {
+        format!("{}\n{}", prompts.translation.trim_end(), substitution)
+    }
 }
 
-fn document_prompt(kind: DocumentKind) -> &'static str {
+fn document_prompt<'a>(prompts: &'a SummarizerPrompts, kind: DocumentKind) -> &'a str {
     match kind {
-        DocumentKind::ResearchArticle => RESEARCH_SUMMARY_PROMPT,
-        DocumentKind::OtherDocument => GENERAL_SUMMARY_PROMPT,
+        DocumentKind::ResearchArticle => prompts.research_summary.as_str(),
+        DocumentKind::OtherDocument => prompts.general_summary.as_str(),
     }
 }
 
@@ -662,15 +743,11 @@ async fn serve_file(path: &Path, original_name: &str, suffix: &str) -> Result<Re
     Ok((headers, bytes).into_response())
 }
 
-fn translation_prompt(glossary: &[GlossaryTermRow]) -> String {
-    build_translation_prompt(glossary)
-}
-
-fn build_summary_request(model: &str, kind: DocumentKind, text: &str) -> LlmRequest {
+fn build_summary_request(model: &str, prompt: &str, text: &str) -> LlmRequest {
     LlmRequest::new(
         model.to_string(),
         vec![
-            ChatMessage::new(MessageRole::System, document_prompt(kind)),
+            ChatMessage::new(MessageRole::System, prompt),
             ChatMessage::new(MessageRole::User, text.to_string()),
         ],
     )
@@ -847,12 +924,17 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
         .summarizer()
         .cloned()
         .ok_or_else(|| anyhow!("Summarizer models are not configured."))?;
+    let prompts = state
+        .prompts_config()
+        .summarizer()
+        .cloned()
+        .ok_or_else(|| anyhow!("Summarizer prompts are not configured."))?;
 
     let glossary_terms = fetch_glossary_terms(&pool).await.unwrap_or_else(|err| {
         error!(?err, "failed to load glossary terms");
         Vec::new()
     });
-    let translation_prompt = translation_prompt(&glossary_terms);
+    let translation_prompt = build_translation_prompt(&prompts, &glossary_terms);
 
     let llm_client = state.llm_client();
     let mut combined_summary_path: Option<String> = None;
@@ -902,7 +984,8 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
             }
         };
 
-        let summary_request = build_summary_request(models.summary_model(), document_kind, &text);
+        let summary_prompt = document_prompt(&prompts, document_kind);
+        let summary_request = build_summary_request(models.summary_model(), summary_prompt, &text);
         let summary_response = match llm_client.execute(summary_request).await {
             Ok(resp) => resp,
             Err(err) => {
@@ -1321,10 +1404,17 @@ mod tests {
             notes: None,
         }];
 
-        let prompt = build_translation_prompt(&terms);
+        let prompts = SummarizerPrompts {
+            research_summary: String::from("summary"),
+            general_summary: String::from("general"),
+            translation: String::from("Use glossary terms:\n{{GLOSSARY}}\nPreserve citations."),
+        };
 
-        assert!(prompt.contains("neuron"));
-        assert!(prompt.contains("神经元"));
+        let prompt = build_translation_prompt(&prompts, &terms);
+
+        assert!(prompt.contains("EN: neuron"));
+        assert!(prompt.contains("CN: 神经元"));
+        assert!(prompt.contains("Use glossary terms"));
     }
 
     #[test]

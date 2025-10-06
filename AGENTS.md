@@ -35,6 +35,15 @@
       translation_model: "openrouter/openai/gpt-4o-mini"
   ```
 - `AppState` loads this once at startup; modules clone the config via `state.models_config()`.
+- When adding new modules, extend the `modules` map with a section matching the module name and any required model identifiers; keep keys snake_case to match Rust struct fields.
+- Configuration re-load requires application restart—there is no hot reload yet.
+
+## Prompt Configuration
+- Prompt copy for modules is stored in `config/prompts.yaml`; override the path with `PROMPTS_CONFIG_PATH` if you need an alternate config per environment.
+- The config mirrors the models file: add a section under `modules` matching the module name and define named prompt strings (use multi-line blocks with `|-` for readability).
+- Summarizer translation copy lives under `translation` and must include the placeholder `{{GLOSSARY}}`, which is replaced at runtime with one EN -> CN pair per line. Omit the placeholder only if the prompt already explains how to reference a glossary.
+- Keep prompts trimmed of Markdown unless the downstream module explicitly renders Markdown; summarizer currently treats prompts as plain text.
+- As with the models config, any prompt changes require restarting the server so `AppState` reloads the YAML.
 
 ## Summarizer Module
 - Routes mounted under `/tools/summarizer` (HTML form) and `/api/summarizer` (JSON/download endpoints).
@@ -44,7 +53,7 @@
   - `GET /api/summarizer/jobs/{job_id}` → JSON status (per-document links, combined outputs, error info).
   - `GET /api/summarizer/jobs/{job_id}/documents/{doc_id}/download/{summary|translation}` → authenticated file stream.
   - `GET /api/summarizer/jobs/{job_id}/combined/{summary|translation}` → combined text downloads.
-- Glossary terms are now persisted in `glossary_terms`; admins manage them from the dashboard, and translation prompts incorporate the local glossary (no external fetch).
+- Glossary terms are now persisted in `glossary_terms` as EN -> CN pairs; admins manage them from the dashboard, and translation prompts incorporate the local glossary (no external fetch).
 - Usage accounting: `users.usage_count` increments by successfully processed documents; request is rejected if projected usage would exceed `usage_limit`.
 
 ## Database

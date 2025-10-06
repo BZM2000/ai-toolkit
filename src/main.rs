@@ -26,7 +26,10 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use crate::{config::ModelsConfig, llm::LlmClient};
+use crate::{
+    config::{ModelsConfig, PromptsConfig},
+    llm::LlmClient,
+};
 
 pub(crate) const SESSION_COOKIE: &str = "auth_token";
 const SESSION_TTL_DAYS: i64 = 7;
@@ -67,6 +70,7 @@ const LOGIN_PAGE_HTML: &str = r##"<!DOCTYPE html>
 struct AppState {
     pool: PgPool,
     models: Arc<ModelsConfig>,
+    prompts: Arc<PromptsConfig>,
     llm: LlmClient,
 }
 
@@ -195,6 +199,8 @@ impl AppState {
     async fn new() -> Result<Self> {
         let models_config =
             ModelsConfig::load_default().context("failed to load models configuration")?;
+        let prompts_config =
+            PromptsConfig::load_default().context("failed to load prompts configuration")?;
         let database_url = env::var("DATABASE_URL").context("DATABASE_URL env var is missing")?;
 
         let llm_client = LlmClient::from_env().context("failed to initialize LLM client")?;
@@ -213,6 +219,7 @@ impl AppState {
         Ok(Self {
             pool,
             models: Arc::new(models_config),
+            prompts: Arc::new(prompts_config),
             llm: llm_client,
         })
     }
@@ -250,6 +257,10 @@ impl AppState {
 
     fn models_config(&self) -> Arc<ModelsConfig> {
         Arc::clone(&self.models)
+    }
+
+    fn prompts_config(&self) -> Arc<PromptsConfig> {
+        Arc::clone(&self.prompts)
     }
 
     fn llm_client(&self) -> LlmClient {
@@ -442,22 +453,23 @@ async fn dashboard(
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "—".to_string());
                 glossary_rows.push_str(&format!(
-                    r#"<tr><td>{source}</td><td>{target}</td><td>{notes}</td><td>
+                    r#"<tr><td>{en}</td><td>{cn}</td><td>{notes}</td><td>
     <form method="post" action="/dashboard/glossary/delete" onsubmit="return confirm('Remove this glossary term?');">
         <input type="hidden" name="id" value="{id}">
         <button type="submit" class="danger">Delete</button>
     </form>
 </td></tr>"#,
-                    source = escape_html(&term.source_term),
-                    target = escape_html(&term.target_term),
+                    en = escape_html(&term.source_term),
+                    cn = escape_html(&term.target_term),
                     notes = notes_display,
                     id = term.id
                 ));
 
                 glossary_select_options.push_str(&format!(
-                    "<option value=\"{id}\">{label}</option>",
+                    "<option value=\"{id}\">EN: {en} -> CN: {cn}</option>",
                     id = term.id,
-                    label = escape_html(&term.source_term)
+                    en = escape_html(&term.source_term),
+                    cn = escape_html(&term.target_term)
                 ));
             }
         }
@@ -480,7 +492,7 @@ async fn dashboard(
     <div class="stack">
         <table class="glossary">
             <thead>
-                <tr><th>Source Term</th><th>Target Term</th><th>Notes</th><th>Actions</th></tr>
+                <tr><th>EN Term</th><th>CN Term</th><th>Notes</th><th>Actions</th></tr>
             </thead>
             <tbody>
                 {glossary_rows}
@@ -490,11 +502,11 @@ async fn dashboard(
             <form method="post" action="/dashboard/glossary">
                 <h3>Add Term</h3>
                 <div class="field">
-                    <label for="glossary-source">Source term</label>
+                    <label for="glossary-source">EN term</label>
                     <input id="glossary-source" name="source_term" required>
                 </div>
                 <div class="field">
-                    <label for="glossary-target">Target term</label>
+                    <label for="glossary-target">CN term</label>
                     <input id="glossary-target" name="target_term" required>
                 </div>
                 <div class="field">
@@ -512,11 +524,11 @@ async fn dashboard(
                     </select>
                 </div>
                 <div class="field">
-                    <label for="glossary-update-source">New source term</label>
+                    <label for="glossary-update-source">Updated EN term</label>
                     <input id="glossary-update-source" name="source_term" required{glossary_update_disabled_attr}>
                 </div>
                 <div class="field">
-                    <label for="glossary-update-target">New target term</label>
+                    <label for="glossary-update-target">Updated CN term</label>
                     <input id="glossary-update-target" name="target_term" required{glossary_update_disabled_attr}>
                 </div>
                 <div class="field">
