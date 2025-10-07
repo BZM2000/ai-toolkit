@@ -714,7 +714,7 @@ async fn dashboard(
     let mut user_options = String::new();
 
     if users.is_empty() {
-        table_rows.push_str("<tr><td colspan=\"4\">当前还没有用户。</td></tr>");
+        table_rows.push_str("<tr><td colspan=\"5\">当前还没有用户。</td></tr>");
     } else {
         for user in &users {
             let role = if user.is_admin {
@@ -722,8 +722,8 @@ async fn dashboard(
             } else {
                 "普通用户"
             };
-            let highlight = if user.username == auth_user.username {
-                " class=\"current-user\""
+            let highlight_class = if user.username == auth_user.username {
+                "current-user"
             } else {
                 ""
             };
@@ -732,10 +732,15 @@ async fn dashboard(
             let limit_entries = group_lookup.get(&user.usage_group_id);
 
             let mut chips = String::new();
+            let mut total_units = 0;
+            let mut total_tokens = 0;
             for descriptor in usage::REGISTERED_MODULES {
                 let usage_snapshot = usage_entries.and_then(|map| map.get(descriptor.key));
                 let units_used = usage_snapshot.map(|s| s.units).unwrap_or(0);
                 let tokens_used = usage_snapshot.map(|s| s.tokens).unwrap_or(0);
+
+                total_units += units_used;
+                total_tokens += tokens_used;
 
                 let limit_snapshot = limit_entries.and_then(|map| map.get(descriptor.key));
 
@@ -759,15 +764,25 @@ async fn dashboard(
                 ));
             }
 
-            let usage_html = format!("<div class=\"usage-grid\">{chips}</div>");
+            let usage_detail_html = format!("<div class=\"usage-grid\">{chips}</div>");
+            let usage_summary = format!("{total_units} 项 · {total_tokens} 令牌");
 
+            // Main row with summary
             table_rows.push_str(&format!(
-                "<tr{highlight}><td>{name}</td><td>{group}</td><td>{role}</td><td>{usage}</td></tr>",
+                "<tr class=\"user-row {highlight}\" data-user-id=\"{id}\"><td><span class=\"expand-icon\">▶</span> {name}</td><td>{group}</td><td>{role}</td><td class=\"usage-summary\">{summary}</td><td class=\"actions\"><button class=\"btn-sm\" onclick=\"toggleUserDetails('{id}')\">详情</button></td></tr>",
+                id = user.id,
                 name = escape_html(&user.username),
                 group = escape_html(&user.usage_group_name),
                 role = role,
-                usage = usage_html,
-                highlight = highlight
+                summary = escape_html(&usage_summary),
+                highlight = highlight_class
+            ));
+
+            // Detail row (hidden by default)
+            table_rows.push_str(&format!(
+                "<tr class=\"user-detail-row\" id=\"detail-{id}\" style=\"display: none;\"><td colspan=\"5\">{usage}</td></tr>",
+                id = user.id,
+                usage = usage_detail_html
             ));
 
             user_options.push_str(&format!(
@@ -789,87 +804,75 @@ async fn dashboard(
 
     let message_block = compose_flash_message(&params);
 
-    let mut model_notes = String::new();
-    if let Some(settings) = state.summarizer_settings().await {
-        model_notes.push_str(&format!(
-            "<p class=\"meta-note\">摘要使用模型 <code>{summary}</code>，翻译使用模型 <code>{translation}</code>。</p>",
-            summary = escape_html(&settings.models.summary_model),
-            translation = escape_html(&settings.models.translation_model)
-        ));
-    }
-    if let Some(settings) = state.translate_docx_settings().await {
-        model_notes.push_str(&format!(
-            "<p class=\"meta-note\">DOCX 翻译使用模型 <code>{translation}</code>。</p>",
-            translation = escape_html(&settings.models.translation_model)
-        ));
-    }
-    if let Some(settings) = state.grader_settings().await {
-        model_notes.push_str(&format!(
-            "<p class=\"meta-note\">稿件评估使用模型 <code>{grading}</code>，关键词匹配使用模型 <code>{keyword}</code>。</p>",
-            grading = escape_html(&settings.models.grading_model),
-            keyword = escape_html(&settings.models.keyword_model)
-        ));
-    }
-
-    let module_links = "<ul class=\"module-links\">\n        <li><a href=\"/dashboard/modules/summarizer\">摘要与翻译模块设置</a></li>\n        <li><a href=\"/dashboard/modules/translatedocx\">DOCX 翻译模块设置</a></li>\n        <li><a href=\"/dashboard/modules/grader\">稿件评估模块设置</a></li>\n    </ul>";
-
     let user_controls = format!(
-        r##"<section class=\"admin\">
-    <h2>创建用户</h2>
-    <form method=\"post\" action=\"/dashboard/users\">
-        <div class=\"field\">
-            <label for=\"new-username\">用户名</label>
-            <input id=\"new-username\" name=\"username\" required>
-        </div>
-        <div class=\"field\">
-            <label for=\"new-password\">密码</label>
-            <input id=\"new-password\" type=\"password\" name=\"password\" required>
-        </div>
-        <div class=\"field\">
-            <label for=\"new-group\">额度组</label>
-            <select id=\"new-group\" name=\"usage_group_id\" required>
-                {group_options}
-            </select>
-        </div>
-        <div class=\"field checkbox\">
-            <label><input type=\"checkbox\" name=\"is_admin\" value=\"on\"> 授予管理员权限</label>
-        </div>
-        <button type=\"submit\">创建用户</button>
-    </form>
+        r##"<section class=\"admin collapsible-section\">
+    <h2 class=\"section-header\" onclick=\"toggleSection('create-user')\">
+        <span class=\"toggle-icon\" id=\"icon-create-user\">▼</span> 创建用户
+    </h2>
+    <div class=\"section-content\" id=\"content-create-user\">
+        <form method=\"post\" action=\"/dashboard/users\">
+            <div class=\"field\">
+                <label for=\"new-username\">用户名</label>
+                <input id=\"new-username\" name=\"username\" required>
+            </div>
+            <div class=\"field\">
+                <label for=\"new-password\">密码</label>
+                <input id=\"new-password\" type=\"password\" name=\"password\" required>
+            </div>
+            <div class=\"field\">
+                <label for=\"new-group\">额度组</label>
+                <select id=\"new-group\" name=\"usage_group_id\" required>
+                    {group_options}
+                </select>
+            </div>
+            <div class=\"field checkbox\">
+                <label><input type=\"checkbox\" name=\"is_admin\" value=\"on\"> 授予管理员权限</label>
+            </div>
+            <button type=\"submit\">创建用户</button>
+        </form>
+    </div>
 </section>
-<section class=\"admin\">
-    <h2>调整用户额度组</h2>
-    <form method=\"post\" action=\"/dashboard/users/group\">
-        <div class=\"field\">
-            <label for=\"assign-username\">选择用户</label>
-            <select id=\"assign-username\" name=\"username\" required{disabled}>
-                {user_options}
-            </select>
-        </div>
-        <div class=\"field\">
-            <label for=\"assign-group\">额度组</label>
-            <select id=\"assign-group\" name=\"usage_group_id\" required>
-                {group_options_assign}
-            </select>
-        </div>
-        <button type=\"submit\"{disabled}>更新额度组</button>
-    </form>
+<section class=\"admin collapsible-section\">
+    <h2 class=\"section-header\" onclick=\"toggleSection('assign-group')\">
+        <span class=\"toggle-icon\" id=\"icon-assign-group\">▶</span> 调整用户额度组
+    </h2>
+    <div class=\"section-content collapsed\" id=\"content-assign-group\">
+        <form method=\"post\" action=\"/dashboard/users/group\">
+            <div class=\"field\">
+                <label for=\"assign-username\">选择用户</label>
+                <select id=\"assign-username\" name=\"username\" required{disabled}>
+                    {user_options}
+                </select>
+            </div>
+            <div class=\"field\">
+                <label for=\"assign-group\">额度组</label>
+                <select id=\"assign-group\" name=\"usage_group_id\" required>
+                    {group_options_assign}
+                </select>
+            </div>
+            <button type=\"submit\"{disabled}>更新额度组</button>
+        </form>
+    </div>
 </section>
-<section class=\"admin\">
-    <h2>重置密码</h2>
-    <form method=\"post\" action=\"/dashboard/users/password\">
-        <div class=\"field\">
-            <label for=\"reset-username\">选择用户</label>
-            <select id=\"reset-username\" name=\"username\" required{disabled}>
-                {user_options}
-            </select>
-        </div>
-        <div class=\"field\">
-            <label for=\"reset-password\">新密码</label>
-            <input id=\"reset-password\" type=\"password\" name=\"password\" required{disabled}>
-        </div>
-        <button type=\"submit\"{disabled}>更新密码</button>
-    </form>
+<section class=\"admin collapsible-section\">
+    <h2 class=\"section-header\" onclick=\"toggleSection('reset-password')\">
+        <span class=\"toggle-icon\" id=\"icon-reset-password\">▶</span> 重置密码
+    </h2>
+    <div class=\"section-content collapsed\" id=\"content-reset-password\">
+        <form method=\"post\" action=\"/dashboard/users/password\">
+            <div class=\"field\">
+                <label for=\"reset-username\">选择用户</label>
+                <select id=\"reset-username\" name=\"username\" required{disabled}>
+                    {user_options}
+                </select>
+            </div>
+            <div class=\"field\">
+                <label for=\"reset-password\">新密码</label>
+                <input id=\"reset-password\" type=\"password\" name=\"password\" required{disabled}>
+            </div>
+            <button type=\"submit\"{disabled}>更新密码</button>
+        </form>
+    </div>
 </section>"##,
         group_options = group_options_for_create,
         group_options_assign = group_options_for_assign,
@@ -925,27 +928,33 @@ async fn dashboard(
             .map(|d| escape_html(d))
             .unwrap_or_default();
 
+        let section_id = format!("group-{}", group.id);
         group_sections.push_str(&format!(
-            r##"<section class=\"admin group-panel\">
-    <h2>额度组：{name}</h2>
-    <p class=\"meta-note\">{desc}</p>
-    <form method=\"post\" action=\"/dashboard/usage-groups\">
-        <input type=\"hidden\" name=\"group_id\" value=\"{id}\">
-        <div class=\"field\">
-            <label for=\"group-name-{id}\">组名称</label>
-            <input id=\"group-name-{id}\" name=\"name\" value=\"{name}\" required>
-        </div>
-        <div class=\"field\">
-            <label for=\"group-desc-{id}\">描述</label>
-            <input id=\"group-desc-{id}\" name=\"description\" value=\"{desc_value}\" placeholder=\"可选\">
-        </div>
-        {module_fields}
-        <div class=\"action-stack\">
-            <button type=\"submit\">保存额度</button>
-        </div>
-    </form>
+            r##"<section class=\"admin collapsible-section group-panel\">
+    <h2 class=\"section-header\" onclick=\"toggleSection('{section_id}')\">
+        <span class=\"toggle-icon\" id=\"icon-{section_id}\">▶</span> 额度组：{name}
+    </h2>
+    <div class=\"section-content collapsed\" id=\"content-{section_id}\">
+        <p class=\"meta-note\">{desc}</p>
+        <form method=\"post\" action=\"/dashboard/usage-groups\">
+            <input type=\"hidden\" name=\"group_id\" value=\"{id}\">
+            <div class=\"field\">
+                <label for=\"group-name-{id}\">组名称</label>
+                <input id=\"group-name-{id}\" name=\"name\" value=\"{name}\" required>
+            </div>
+            <div class=\"field\">
+                <label for=\"group-desc-{id}\">描述</label>
+                <input id=\"group-desc-{id}\" name=\"description\" value=\"{desc_value}\" placeholder=\"可选\">
+            </div>
+            {module_fields}
+            <div class=\"action-stack\">
+                <button type=\"submit\">保存额度</button>
+            </div>
+        </form>
+    </div>
 </section>"##,
             id = group.id,
+            section_id = section_id,
             name = escape_html(&group.name),
             desc = desc_display,
             desc_value = desc_value,
@@ -976,22 +985,26 @@ async fn dashboard(
     }
 
     let new_group_section = format!(
-        r##"<section class=\"admin group-panel\">
-    <h2>新建额度组</h2>
-    <form method=\"post\" action=\"/dashboard/usage-groups\">
-        <div class=\"field\">
-            <label for=\"new-group-name\">组名称</label>
-            <input id=\"new-group-name\" name=\"name\" required>
-        </div>
-        <div class=\"field\">
-            <label for=\"new-group-desc\">描述</label>
-            <input id=\"new-group-desc\" name=\"description\" placeholder=\"可选\">
-        </div>
-        {new_group_fields}
-        <div class=\"action-stack\">
-            <button type=\"submit\">创建额度组</button>
-        </div>
-    </form>
+        r##"<section class=\"admin collapsible-section group-panel\">
+    <h2 class=\"section-header\" onclick=\"toggleSection('new-group')\">
+        <span class=\"toggle-icon\" id=\"icon-new-group\">▶</span> 新建额度组
+    </h2>
+    <div class=\"section-content collapsed\" id=\"content-new-group\">
+        <form method=\"post\" action=\"/dashboard/usage-groups\">
+            <div class=\"field\">
+                <label for=\"new-group-name\">组名称</label>
+                <input id=\"new-group-name\" name=\"name\" required>
+            </div>
+            <div class=\"field\">
+                <label for=\"new-group-desc\">描述</label>
+                <input id=\"new-group-desc\" name=\"description\" placeholder=\"可选\">
+            </div>
+            {new_group_fields}
+            <div class=\"action-stack\">
+                <button type=\"submit\">创建额度组</button>
+            </div>
+        </form>
+    </div>
 </section>"##,
         new_group_fields = new_group_fields,
     );
@@ -1015,18 +1028,30 @@ async fn dashboard(
         .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
         main {{ padding: 2rem 1.5rem; max-width: 1100px; margin: 0 auto; box-sizing: border-box; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
-        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }}
+        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: middle; }}
         th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
-        tr.current-user td {{ background: #eff6ff; }}
-        .usage-grid {{ display: grid; gap: 0.6rem; }}
+        tr.user-row {{ cursor: pointer; transition: background 0.15s ease; }}
+        tr.user-row:hover {{ background: #f8fafc; }}
+        tr.user-row.current-user td {{ background: #eff6ff; }}
+        tr.user-row.current-user:hover td {{ background: #dbeafe; }}
+        tr.user-detail-row td {{ background: #f8fafc; padding: 1.5rem; vertical-align: top; }}
+        .expand-icon {{ display: inline-block; width: 1.2em; font-size: 0.85em; color: #64748b; transition: transform 0.2s ease; }}
+        .user-row.expanded .expand-icon {{ transform: rotate(90deg); }}
+        .usage-summary {{ color: #64748b; font-size: 0.95em; }}
+        .usage-grid {{ display: grid; gap: 0.6rem; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }}
         .usage-chip {{ display: flex; flex-direction: column; gap: 0.25rem; padding: 0.75rem; border-radius: 10px; border: 1px solid #e2e8f0; background: #ffffff; }}
         .usage-chip .chip-title {{ font-weight: 600; color: #1d4ed8; }}
-        .module-links {{ margin-top: 1rem; padding-left: 1.2rem; color: #475569; }}
-        .module-links li {{ margin-bottom: 0.5rem; }}
-        .module-links a {{ color: #2563eb; text-decoration: none; }}
-        .module-links a:hover {{ text-decoration: underline; }}
-        .admin {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #ffffff; border: 1px solid #e2e8f0; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
+        .admin {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #ffffff; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08); }}
         .admin h2 {{ margin-top: 0; color: #1d4ed8; }}
+        .collapsible-section {{ padding: 0; }}
+        .section-header {{ margin: 0; padding: 1rem 1.5rem; cursor: pointer; user-select: none; transition: background 0.15s ease; border-radius: 12px; }}
+        .section-header:hover {{ background: #f8fafc; }}
+        .toggle-icon {{ display: inline-block; width: 1.2em; font-size: 0.9em; color: #64748b; transition: transform 0.2s ease; }}
+        .section-content {{ padding: 0 1.5rem 1.5rem 1.5rem; overflow: hidden; transition: max-height 0.3s ease, opacity 0.3s ease; max-height: 2000px; opacity: 1; }}
+        .section-content.collapsed {{ max-height: 0; opacity: 0; padding-top: 0; padding-bottom: 0; }}
+        .btn-sm {{ padding: 0.4rem 0.8rem; font-size: 0.85rem; border: 1px solid #cbd5e1; background: #ffffff; color: #475569; border-radius: 6px; cursor: pointer; transition: all 0.15s ease; }}
+        .btn-sm:hover {{ background: #f1f5f9; border-color: #94a3b8; }}
+        .actions {{ text-align: right; }}
         .field {{ margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }}
         .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; }}
         .field input:focus, .field select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
@@ -1041,8 +1066,7 @@ async fn dashboard(
         .flash {{ padding: 1rem; border-radius: 8px; margin-top: 1rem; border: 1px solid transparent; }}
         .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
         .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
-        .meta {{ margin-top: 1.5rem; font-size: 0.95rem; color: #475569; }}
-        .meta-note {{ margin-bottom: 0.5rem; }}
+        .meta-note {{ margin-bottom: 0.5rem; color: #64748b; font-size: 0.95rem; }}
         .group-panel {{ margin-top: 2.5rem; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
     </style>
@@ -1060,30 +1084,50 @@ async fn dashboard(
         {message_block}
         <table>
             <thead>
-                <tr><th>用户名</th><th>额度组</th><th>角色</th><th>近 7 日使用</th></tr>
+                <tr><th>用户名</th><th>额度组</th><th>角色</th><th>近 7 日使用（摘要）</th><th>操作</th></tr>
             </thead>
             <tbody>
                 {table_rows}
             </tbody>
         </table>
-        <div class=\"meta\">
-            {model_notes}
-            <p>模块设置入口：</p>
-            {module_links}
-        </div>
         {user_controls}
         {group_sections}
         {new_group}
         {footer}
     </main>
+    <script>
+        function toggleUserDetails(userId) {{
+            const detailRow = document.getElementById('detail-' + userId);
+            const userRow = document.querySelector('tr.user-row[data-user-id=\"' + userId + '\"]');
+
+            if (detailRow.style.display === 'none') {{
+                detailRow.style.display = 'table-row';
+                userRow.classList.add('expanded');
+            }} else {{
+                detailRow.style.display = 'none';
+                userRow.classList.remove('expanded');
+            }}
+        }}
+
+        function toggleSection(sectionId) {{
+            const content = document.getElementById('content-' + sectionId);
+            const icon = document.getElementById('icon-' + sectionId);
+
+            if (content.classList.contains('collapsed')) {{
+                content.classList.remove('collapsed');
+                icon.textContent = '▼';
+            }} else {{
+                content.classList.add('collapsed');
+                icon.textContent = '▶';
+            }}
+        }}
+    </script>
 </body>
 </html>"##,
         auth_id = auth_user.id,
         username = escape_html(&auth_user.username),
         message_block = message_block,
         table_rows = table_rows,
-        model_notes = model_notes,
-        module_links = module_links,
         user_controls = user_controls,
         group_sections = group_sections,
         new_group = new_group_section,
