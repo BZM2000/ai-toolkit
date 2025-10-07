@@ -181,11 +181,11 @@ pub async fn dashboard(
         <form method=\"post\" action=\"/dashboard/users\">
             <div class=\"field\">
                 <label for=\"new-username\">用户名</label>
-                <input id=\"new-username\" name=\"username\" required>
+                <input type=\"text\" id=\"new-username\" name=\"username\" required>
             </div>
             <div class=\"field\">
                 <label for=\"new-password\">密码</label>
-                <input id=\"new-password\" type=\"password\" name=\"password\" required>
+                <input type=\"password\" id=\"new-password\" name=\"password\" required>
             </div>
             <div class=\"field\">
                 <label for=\"new-group\">额度组</label>
@@ -198,7 +198,7 @@ pub async fn dashboard(
             </div>
             <div class=\"modal-actions\">
                 <button type=\"button\" class=\"btn-sm\" onclick=\"closeCreateUserModal()\">取消</button>
-                <button type=\"submit\">创建用户</button>
+                <button type=\"submit\" class=\"btn-primary\">创建用户</button>
             </div>
         </form>
     </div>
@@ -211,13 +211,14 @@ pub async fn dashboard(
         let mut module_fields = String::new();
         for descriptor in usage::REGISTERED_MODULES {
             let limit = group.limits.get(descriptor.key);
-            let units_value = limit
-                .and_then(|l| l.unit_limit)
-                .map(|v| v.to_string())
+            let units_value = limit.and_then(|l| l.unit_limit);
+            let tokens_value = limit.and_then(|l| l.token_limit);
+
+            let units_attr = units_value
+                .map(|v| format!(" value=\"{}\"", v))
                 .unwrap_or_default();
-            let tokens_value = limit
-                .and_then(|l| l.token_limit)
-                .map(|v| v.to_string())
+            let tokens_attr = tokens_value
+                .map(|v| format!(" value=\"{}\"", v))
                 .unwrap_or_default();
 
             module_fields.push_str(&format!(
@@ -226,11 +227,11 @@ pub async fn dashboard(
         <div class=\"dual-inputs\">
             <div class=\"field\">
                 <label for=\"units-{key}-{id}\">{unit_label}（近 7 日）</label>
-                <input id=\"units-{key}-{id}\" name=\"units_{key}\" value=\"{units}\" placeholder=\"留空表示不限\">
+                <input type=\"number\" id=\"units-{key}-{id}\" name=\"units_{key}\"{units_attr} placeholder=\"留空表示不限\" min=\"0\">
             </div>
             <div class=\"field\">
                 <label for=\"tokens-{key}-{id}\">令牌上限（近 7 日）</label>
-                <input id=\"tokens-{key}-{id}\" name=\"tokens_{key}\" value=\"{tokens}\" placeholder=\"留空表示不限\">
+                <input type=\"number\" id=\"tokens-{key}-{id}\" name=\"tokens_{key}\"{tokens_attr} placeholder=\"留空表示不限\" min=\"0\">
             </div>
         </div>
     </div>"#,
@@ -238,8 +239,8 @@ pub async fn dashboard(
                 key = descriptor.key,
                 id = group.id,
                 unit_label = descriptor.unit_label,
-                units = escape_html(&units_value),
-                tokens = escape_html(&tokens_value),
+                units_attr = units_attr,
+                tokens_attr = tokens_attr,
             ));
         }
 
@@ -248,10 +249,10 @@ pub async fn dashboard(
             .as_ref()
             .map(|d| escape_html(d))
             .unwrap_or_else(|| "无描述".to_string());
-        let desc_value = group
+        let desc_value_attr = group
             .description
             .as_ref()
-            .map(|d| escape_html(d))
+            .map(|d| format!(" value=\"{}\"", escape_html(d)))
             .unwrap_or_default();
 
         let section_id = format!("group-{}", group.id);
@@ -266,15 +267,15 @@ pub async fn dashboard(
             <input type=\"hidden\" name=\"group_id\" value=\"{id}\">
             <div class=\"field\">
                 <label for=\"group-name-{id}\">组名称</label>
-                <input id=\"group-name-{id}\" name=\"name\" value=\"{name}\" required>
+                <input type=\"text\" id=\"group-name-{id}\" name=\"name\" value=\"{name}\" required>
             </div>
             <div class=\"field\">
                 <label for=\"group-desc-{id}\">描述</label>
-                <input id=\"group-desc-{id}\" name=\"description\" value=\"{desc_value}\" placeholder=\"可选\">
+                <input type=\"text\" id=\"group-desc-{id}\" name=\"description\"{desc_value_attr} placeholder=\"可选\">
             </div>
             {module_fields}
             <div class=\"action-stack\">
-                <button type=\"submit\">保存额度</button>
+                <button type=\"submit\" class=\"btn-primary\">保存额度</button>
             </div>
         </form>
     </div>
@@ -283,7 +284,7 @@ pub async fn dashboard(
             section_id = section_id,
             name = escape_html(&group.name),
             desc = desc_display,
-            desc_value = desc_value,
+            desc_value_attr = desc_value_attr,
             module_fields = module_fields,
         ));
     }
@@ -296,11 +297,11 @@ pub async fn dashboard(
         <div class=\"dual-inputs\">
             <div class=\"field\">
                 <label for=\"new-units-{key}\">{unit_label}（近 7 日）</label>
-                <input id=\"new-units-{key}\" name=\"units_{key}\" placeholder=\"留空表示不限\">
+                <input type=\"number\" id=\"new-units-{key}\" name=\"units_{key}\" placeholder=\"留空表示不限\" min=\"0\">
             </div>
             <div class=\"field\">
                 <label for=\"new-tokens-{key}\">令牌上限（近 7 日）</label>
-                <input id=\"new-tokens-{key}\" name=\"tokens_{key}\" placeholder=\"留空表示不限\">
+                <input type=\"number\" id=\"new-tokens-{key}\" name=\"tokens_{key}\" placeholder=\"留空表示不限\" min=\"0\">
             </div>
         </div>
     </div>"#,
@@ -323,16 +324,16 @@ pub async fn dashboard(
                 <input type=\"hidden\" name=\"group_id\" value=\"\">
                 <div class=\"field\">
                     <label for=\"new-group-name\">组名称</label>
-                    <input id=\"new-group-name\" name=\"name\" required>
+                    <input type=\"text\" id=\"new-group-name\" name=\"name\" required>
                 </div>
                 <div class=\"field\">
                     <label for=\"new-group-desc\">描述</label>
-                    <input id=\"new-group-desc\" name=\"description\" placeholder=\"可选\">
+                    <input type=\"text\" id=\"new-group-desc\" name=\"description\" placeholder=\"可选\">
                 </div>
                 {new_group_fields}
                 <div class=\"modal-actions\">
                     <button type=\"button\" class=\"btn-sm\" onclick=\"closeCreateGroupModal()\">取消</button>
-                    <button type=\"submit\">保存额度</button>
+                    <button type=\"submit\" class=\"btn-primary\">保存额度</button>
                 </div>
             </form>
         </div>
@@ -399,16 +400,24 @@ pub async fn dashboard(
         .field label {{ font-weight: 600; color: #0f172a; font-size: 0.9375rem; }}
         .field input[type="text"],
         .field input[type="password"],
+        .field input[type="number"],
         .field input:not([type]) {{ padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 1rem; transition: all 0.2s ease; width: 100%; }}
         .field input[type="text"]:hover,
         .field input[type="password"]:hover,
+        .field input[type="number"]:hover,
         .field input:not([type]):hover {{ border-color: #94a3b8; }}
         .field input[type="text"]:focus,
         .field input[type="password"]:focus,
+        .field input[type="number"]:focus,
         .field input:not([type]):focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
         .field input[type="text"]::placeholder,
         .field input[type="password"]::placeholder,
+        .field input[type="number"]::placeholder,
         .field input:not([type])::placeholder {{ color: #94a3b8; }}
+        .field input[type="number"]::-webkit-inner-spin-button,
+        .field input[type="number"]::-webkit-outer-spin-button {{ opacity: 0.6; }}
+        .field input[type="number"]:hover::-webkit-inner-spin-button,
+        .field input[type="number"]:hover::-webkit-outer-spin-button {{ opacity: 1; }}
         .field select {{ padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 1rem; cursor: pointer; transition: all 0.2s ease; width: 100%; }}
         .field select:hover {{ border-color: #94a3b8; }}
         .field select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
