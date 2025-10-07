@@ -711,7 +711,6 @@ async fn dashboard(
     }
 
     let mut table_rows = String::new();
-    let mut user_options = String::new();
 
     if users.is_empty() {
         table_rows.push_str("<tr><td colspan=\"5\">当前还没有用户。</td></tr>");
@@ -767,12 +766,34 @@ async fn dashboard(
             let usage_detail_html = format!("<div class=\"usage-grid\">{chips}</div>");
             let usage_summary = format!("{total_units} 项 · {total_tokens} 令牌");
 
+            // Build group dropdown for this user
+            let mut group_select = format!(
+                "<form method=\"post\" action=\"/dashboard/users/group\" class=\"inline-form\" onsubmit=\"return confirm('确认更改 {} 的额度组？');\">",
+                escape_html(&user.username)
+            );
+            group_select.push_str(&format!(
+                "<input type=\"hidden\" name=\"username\" value=\"{}\">",
+                escape_html(&user.username)
+            ));
+            group_select.push_str("<select name=\"usage_group_id\" class=\"inline-select\" onchange=\"this.form.submit()\">");
+            for group in &groups {
+                let selected = if group.id == user.usage_group_id { " selected" } else { "" };
+                group_select.push_str(&format!(
+                    "<option value=\"{}\"{}>{}</option>",
+                    escape_html(&group.id.to_string()),
+                    selected,
+                    escape_html(&group.name)
+                ));
+            }
+            group_select.push_str("</select></form>");
+
             // Main row with summary
             table_rows.push_str(&format!(
-                "<tr class=\"user-row {highlight}\" data-user-id=\"{id}\"><td><span class=\"expand-icon\">▶</span> {name}</td><td>{group}</td><td>{role}</td><td class=\"usage-summary\">{summary}</td><td class=\"actions\"><button class=\"btn-sm\" onclick=\"toggleUserDetails('{id}')\">详情</button></td></tr>",
+                "<tr class=\"user-row {highlight}\" data-user-id=\"{id}\"><td><span class=\"expand-icon\">▶</span> {name}</td><td>{group_dropdown}</td><td>{role}</td><td class=\"usage-summary\">{summary}</td><td class=\"actions\"><button class=\"btn-sm\" onclick=\"toggleUserDetails('{id}')\">详情</button><button class=\"btn-sm btn-warning\" data-username=\"{username}\" onclick=\"resetPassword(this)\">重置密码</button></td></tr>",
                 id = user.id,
                 name = escape_html(&user.username),
-                group = escape_html(&user.usage_group_name),
+                username = escape_html(&user.username),
+                group_dropdown = group_select,
                 role = role,
                 summary = escape_html(&usage_summary),
                 highlight = highlight_class
@@ -784,23 +805,8 @@ async fn dashboard(
                 id = user.id,
                 usage = usage_detail_html
             ));
-
-            user_options.push_str(&format!(
-                "<option value=\"{value}\">{label}</option>",
-                value = escape_html(&user.username),
-                label = escape_html(&user.username)
-            ));
         }
     }
-
-    let (user_options, reset_disabled_attr) = if user_options.is_empty() {
-        (
-            "<option value=\"\" disabled selected>暂无可选用户</option>".to_string(),
-            " disabled",
-        )
-    } else {
-        (user_options, "")
-    };
 
     let message_block = compose_flash_message(&params);
 
@@ -831,53 +837,8 @@ async fn dashboard(
             <button type=\"submit\">创建用户</button>
         </form>
     </div>
-</section>
-<section class=\"admin collapsible-section\">
-    <h2 class=\"section-header\" onclick=\"toggleSection('assign-group')\">
-        <span class=\"toggle-icon\" id=\"icon-assign-group\">▶</span> 调整用户额度组
-    </h2>
-    <div class=\"section-content collapsed\" id=\"content-assign-group\">
-        <form method=\"post\" action=\"/dashboard/users/group\">
-            <div class=\"field\">
-                <label for=\"assign-username\">选择用户</label>
-                <select id=\"assign-username\" name=\"username\" required{disabled}>
-                    {user_options}
-                </select>
-            </div>
-            <div class=\"field\">
-                <label for=\"assign-group\">额度组</label>
-                <select id=\"assign-group\" name=\"usage_group_id\" required>
-                    {group_options_assign}
-                </select>
-            </div>
-            <button type=\"submit\"{disabled}>更新额度组</button>
-        </form>
-    </div>
-</section>
-<section class=\"admin collapsible-section\">
-    <h2 class=\"section-header\" onclick=\"toggleSection('reset-password')\">
-        <span class=\"toggle-icon\" id=\"icon-reset-password\">▶</span> 重置密码
-    </h2>
-    <div class=\"section-content collapsed\" id=\"content-reset-password\">
-        <form method=\"post\" action=\"/dashboard/users/password\">
-            <div class=\"field\">
-                <label for=\"reset-username\">选择用户</label>
-                <select id=\"reset-username\" name=\"username\" required{disabled}>
-                    {user_options}
-                </select>
-            </div>
-            <div class=\"field\">
-                <label for=\"reset-password\">新密码</label>
-                <input id=\"reset-password\" type=\"password\" name=\"password\" required{disabled}>
-            </div>
-            <button type=\"submit\"{disabled}>更新密码</button>
-        </form>
-    </div>
 </section>"##,
         group_options = group_options_for_create,
-        group_options_assign = group_options_for_assign,
-        user_options = user_options,
-        disabled = reset_disabled_attr,
     );
 
     let mut group_sections = String::new();
@@ -1053,9 +1014,11 @@ async fn dashboard(
         .btn-sm:hover {{ background: #f1f5f9; border-color: #94a3b8; }}
         .actions {{ text-align: right; }}
         .field {{ margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }}
-        .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; }}
-        .field input:focus, .field select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        .field label {{ font-weight: 600; color: #0f172a; font-size: 0.95rem; }}
+        .field input, .field select, .field textarea {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5e1; background: #f8fafc; color: #0f172a; font-family: inherit; }}
+        .field input:focus, .field select:focus, .field textarea:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
         .field.checkbox {{ flex-direction: row; align-items: center; gap: 0.6rem; }}
+        .field.checkbox label {{ font-weight: 500; }}
         .field-set {{ margin-bottom: 1.5rem; }}
         .field-set h3 {{ margin: 0 0 0.75rem; color: #0f172a; font-size: 1rem; }}
         .dual-inputs {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }}
@@ -1069,6 +1032,19 @@ async fn dashboard(
         .meta-note {{ margin-bottom: 0.5rem; color: #64748b; font-size: 0.95rem; }}
         .group-panel {{ margin-top: 2.5rem; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        .inline-form {{ margin: 0; display: inline; }}
+        .inline-select {{ padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 0.9rem; cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }}
+        .inline-select:hover {{ border-color: #94a3b8; }}
+        .inline-select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        .btn-warning {{ background: #f59e0b; color: #ffffff; margin-left: 0.5rem; }}
+        .btn-warning:hover {{ background: #d97706; }}
+        .actions {{ display: flex; gap: 0.5rem; justify-content: flex-end; }}
+        .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); }}
+        .modal-content {{ background: #ffffff; margin: 10% auto; padding: 2rem; border-radius: 12px; max-width: 400px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }}
+        .modal-header {{ margin-bottom: 1.5rem; }}
+        .modal-header h3 {{ margin: 0; color: #0f172a; }}
+        .modal-actions {{ display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; }}
+        .modal-actions button {{ padding: 0.75rem 1.25rem; }}
     </style>
 </head>
 <body>
@@ -1095,6 +1071,25 @@ async fn dashboard(
         {new_group}
         {footer}
     </main>
+    <div id=\"password-modal\" class=\"modal\">
+        <div class=\"modal-content\">
+            <div class=\"modal-header\">
+                <h3>重置密码</h3>
+            </div>
+            <form id=\"password-reset-form\" method=\"post\" action=\"/dashboard/users/password\">
+                <input type=\"hidden\" name=\"username\" value=\"\">
+                <p>为用户 <strong id=\"reset-username-display\"></strong> 设置新密码：</p>
+                <div class=\"field\">
+                    <label for=\"modal-password-input\">新密码</label>
+                    <input id=\"modal-password-input\" type=\"password\" name=\"password\" required>
+                </div>
+                <div class=\"modal-actions\">
+                    <button type=\"button\" class=\"btn-sm\" onclick=\"closeModal()\">取消</button>
+                    <button type=\"submit\">确认重置</button>
+                </div>
+            </form>
+        </div>
+    </div>
     <script>
         function toggleUserDetails(userId) {{
             const detailRow = document.getElementById('detail-' + userId);
@@ -1119,6 +1114,33 @@ async fn dashboard(
             }} else {{
                 content.classList.add('collapsed');
                 icon.textContent = '▶';
+            }}
+        }}
+
+        function resetPassword(buttonElement) {{
+            const username = buttonElement.getAttribute('data-username');
+            const modal = document.getElementById('password-modal');
+            const usernameSpan = document.getElementById('reset-username-display');
+            const passwordInput = document.getElementById('modal-password-input');
+            const form = document.getElementById('password-reset-form');
+
+            usernameSpan.textContent = username;
+            form.querySelector('input[name=\"username\"]').value = username;
+            passwordInput.value = '';
+
+            modal.style.display = 'block';
+            passwordInput.focus();
+        }}
+
+        function closeModal() {{
+            document.getElementById('password-modal').style.display = 'none';
+        }}
+
+        // Close modal when clicking outside
+        window.onclick = function(event) {{
+            const modal = document.getElementById('password-modal');
+            if (event.target === modal) {{
+                closeModal();
             }}
         }}
     </script>
@@ -1301,7 +1323,7 @@ const MODULE_ADMIN_SHARED_STYLES: &str = r#"
         .field textarea {
             padding: 0.75rem;
             border-radius: 8px;
-            border: 1px solid #cbd5f5;
+            border: 1px solid #cbd5e1;
             background: #f8fafc;
             color: #0f172a;
             font-family: inherit;
@@ -1361,7 +1383,7 @@ const MODULE_ADMIN_SHARED_STYLES: &str = r#"
         .topic-picker select {
             padding: 0.6rem;
             border-radius: 8px;
-            border: 1px solid #cbd5f5;
+            border: 1px solid #cbd5e1;
             background: #ffffff;
         }
         .topic-picker.active {
