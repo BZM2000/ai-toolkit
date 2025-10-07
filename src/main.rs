@@ -1,6 +1,7 @@
 mod config;
 pub mod llm;
 mod modules;
+mod usage;
 
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
 
@@ -117,7 +118,7 @@ struct CreateUserForm {
     username: String,
     password: String,
     #[serde(default)]
-    usage_limit: Option<String>,
+    usage_group_id: Option<Uuid>,
     #[serde(default)]
     is_admin: Option<String>,
 }
@@ -126,6 +127,12 @@ struct CreateUserForm {
 struct UpdatePasswordForm {
     username: String,
     password: String,
+}
+
+#[derive(Deserialize)]
+struct AssignUserGroupForm {
+    username: String,
+    usage_group_id: Uuid,
 }
 
 #[derive(Deserialize)]
@@ -256,10 +263,32 @@ struct AuthUser {
 
 #[derive(sqlx::FromRow)]
 struct DashboardUserRow {
+    id: Uuid,
     username: String,
-    usage_count: i64,
-    usage_limit: Option<i64>,
+    usage_group_id: Uuid,
+    usage_group_name: String,
     is_admin: bool,
+}
+
+#[derive(Clone)]
+struct UsageGroupDisplay {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    limits: HashMap<String, GroupLimitDisplay>,
+}
+
+#[derive(sqlx::FromRow)]
+struct UsageGroupRow {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Clone)]
+struct GroupLimitDisplay {
+    token_limit: Option<i64>,
+    unit_limit: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -319,6 +348,8 @@ async fn app_main() -> Result<()> {
         .route("/dashboard", get(dashboard))
         .route("/dashboard/users", post(create_user))
         .route("/dashboard/users/password", post(update_user_password))
+        .route("/dashboard/users/group", post(assign_user_group))
+        .route("/dashboard/usage-groups", post(save_usage_group))
         .route("/dashboard/glossary", post(create_glossary_term))
         .route("/dashboard/glossary/update", post(update_glossary_term))
         .route("/dashboard/glossary/delete", post(delete_glossary_term))
@@ -421,13 +452,19 @@ impl AppState {
             let password_hash = hash_password("change-me")
                 .map_err(|err| anyhow!("failed to hash seed admin password: {err}"))?;
 
+            let default_group: Uuid =
+                sqlx::query_scalar("SELECT id FROM usage_groups ORDER BY created_at LIMIT 1")
+                    .fetch_one(&self.pool)
+                    .await
+                    .context("failed to locate default usage group")?;
+
             sqlx::query(
-                "INSERT INTO users (id, username, password_hash, usage_limit, is_admin) VALUES ($1, $2, $3, $4, $5)",
+                "INSERT INTO users (id, username, password_hash, usage_group_id, is_admin) VALUES ($1, $2, $3, $4, $5)",
             )
             .bind(Uuid::new_v4())
             .bind("demo-admin")
             .bind(password_hash)
-            .bind(Some(100_i64))
+            .bind(default_group)
             .bind(true)
             .execute(&self.pool)
             .await
@@ -631,13 +668,47 @@ async fn dashboard(
         return Err(Redirect::to("/?error=not_authorized"));
     }
 
-    let users = match fetch_dashboard_users(&state.pool).await {
-        Ok(list) => list,
-        Err(err) => {
-            error!(?err, "failed to load dashboard users");
-            return Err(Redirect::to("/login"));
-        }
-    };
+    let users = fetch_dashboard_users(&state.pool).await.map_err(|err| {
+        error!(?err, "failed to load dashboard users");
+        Redirect::to("/login")
+    })?;
+
+    let user_ids: Vec<Uuid> = users.iter().map(|user| user.id).collect();
+    let usage_map = usage::usage_for_users(&state.pool, &user_ids)
+        .await
+        .unwrap_or_default();
+
+    let groups = fetch_usage_groups_with_limits(&state.pool)
+        .await
+        .map_err(|err| {
+            error!(?err, "failed to load usage groups");
+            Redirect::to("/login")
+        })?;
+
+    if groups.is_empty() {
+        error!("no usage groups configured");
+        return Err(Redirect::to("/login"));
+    }
+
+    let mut group_lookup: HashMap<Uuid, HashMap<String, GroupLimitDisplay>> = HashMap::new();
+    let mut group_options_for_create = String::new();
+    let mut group_options_for_assign = String::new();
+
+    for (idx, group) in groups.iter().enumerate() {
+        group_lookup.insert(group.id, group.limits.clone());
+        let option = format!(
+            "<option value=\"{value}\"{selected}>{label}</option>",
+            value = escape_html(&group.id.to_string()),
+            label = escape_html(&group.name),
+            selected = if idx == 0 { " selected" } else { "" }
+        );
+        group_options_for_create.push_str(&option);
+        group_options_for_assign.push_str(&format!(
+            "<option value=\"{value}\">{label}</option>",
+            value = escape_html(&group.id.to_string()),
+            label = escape_html(&group.name)
+        ));
+    }
 
     let mut table_rows = String::new();
     let mut user_options = String::new();
@@ -646,10 +717,6 @@ async fn dashboard(
         table_rows.push_str("<tr><td colspan=\"4\">当前还没有用户。</td></tr>");
     } else {
         for user in &users {
-            let limit_display = user
-                .usage_limit
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "不限".to_string());
             let role = if user.is_admin {
                 "管理员"
             } else {
@@ -661,12 +728,45 @@ async fn dashboard(
                 ""
             };
 
+            let usage_entries = usage_map.get(&user.id);
+            let limit_entries = group_lookup.get(&user.usage_group_id);
+
+            let mut chips = String::new();
+            for descriptor in usage::REGISTERED_MODULES {
+                let usage_snapshot = usage_entries.and_then(|map| map.get(descriptor.key));
+                let units_used = usage_snapshot.map(|s| s.units).unwrap_or(0);
+                let tokens_used = usage_snapshot.map(|s| s.tokens).unwrap_or(0);
+
+                let limit_snapshot = limit_entries.and_then(|map| map.get(descriptor.key));
+
+                let unit_text = match limit_snapshot.and_then(|l| l.unit_limit) {
+                    Some(limit) => format!(
+                        "{units_used}/{limit} {label}",
+                        label = descriptor.unit_label
+                    ),
+                    None => format!("{units_used} {label}", label = descriptor.unit_label),
+                };
+                let token_text = match limit_snapshot.and_then(|l| l.token_limit) {
+                    Some(limit) => format!("{tokens_used}/{limit} 令牌"),
+                    None => format!("{tokens_used} 令牌"),
+                };
+
+                chips.push_str(&format!(
+                    "<div class=\"usage-chip\"><span class=\"chip-title\">{title}</span><span>{unit}</span><span>{tokens}</span></div>",
+                    title = escape_html(descriptor.label),
+                    unit = escape_html(&unit_text),
+                    tokens = escape_html(&token_text),
+                ));
+            }
+
+            let usage_html = format!("<div class=\"usage-grid\">{chips}</div>");
+
             table_rows.push_str(&format!(
-                "<tr{highlight}><td>{name}</td><td>{count}</td><td>{limit}</td><td>{role}</td></tr>",
+                "<tr{highlight}><td>{name}</td><td>{group}</td><td>{role}</td><td>{usage}</td></tr>",
                 name = escape_html(&user.username),
-                count = user.usage_count,
-                limit = limit_display,
+                group = escape_html(&user.usage_group_name),
                 role = role,
+                usage = usage_html,
                 highlight = highlight
             ));
 
@@ -713,7 +813,7 @@ async fn dashboard(
 
     let module_links = "<ul class=\"module-links\">\n        <li><a href=\"/dashboard/modules/summarizer\">摘要与翻译模块设置</a></li>\n        <li><a href=\"/dashboard/modules/translatedocx\">DOCX 翻译模块设置</a></li>\n        <li><a href=\"/dashboard/modules/grader\">稿件评估模块设置</a></li>\n    </ul>";
 
-    let admin_controls = format!(
+    let user_controls = format!(
         r##"<section class=\"admin\">
     <h2>创建用户</h2>
     <form method=\"post\" action=\"/dashboard/users\">
@@ -726,8 +826,10 @@ async fn dashboard(
             <input id=\"new-password\" type=\"password\" name=\"password\" required>
         </div>
         <div class=\"field\">
-            <label for=\"usage-limit\">调用上限（留空表示不限）</label>
-            <input id=\"usage-limit\" name=\"usage_limit\" placeholder=\"例如：250\">
+            <label for=\"new-group\">额度组</label>
+            <select id=\"new-group\" name=\"usage_group_id\" required>
+                {group_options}
+            </select>
         </div>
         <div class=\"field checkbox\">
             <label><input type=\"checkbox\" name=\"is_admin\" value=\"on\"> 授予管理员权限</label>
@@ -736,23 +838,162 @@ async fn dashboard(
     </form>
 </section>
 <section class=\"admin\">
+    <h2>调整用户额度组</h2>
+    <form method=\"post\" action=\"/dashboard/users/group\">
+        <div class=\"field\">
+            <label for=\"assign-username\">选择用户</label>
+            <select id=\"assign-username\" name=\"username\" required{disabled}>
+                {user_options}
+            </select>
+        </div>
+        <div class=\"field\">
+            <label for=\"assign-group\">额度组</label>
+            <select id=\"assign-group\" name=\"usage_group_id\" required>
+                {group_options_assign}
+            </select>
+        </div>
+        <button type=\"submit\"{disabled}>更新额度组</button>
+    </form>
+</section>
+<section class=\"admin\">
     <h2>重置密码</h2>
     <form method=\"post\" action=\"/dashboard/users/password\">
         <div class=\"field\">
             <label for=\"reset-username\">选择用户</label>
-            <select id=\"reset-username\" name=\"username\" required{reset_disabled_attr}>
+            <select id=\"reset-username\" name=\"username\" required{disabled}>
                 {user_options}
             </select>
         </div>
         <div class=\"field\">
             <label for=\"reset-password\">新密码</label>
-            <input id=\"reset-password\" type=\"password\" name=\"password\" required{reset_disabled_attr}>
+            <input id=\"reset-password\" type=\"password\" name=\"password\" required{disabled}>
         </div>
-        <button type=\"submit\"{reset_disabled_attr}>更新密码</button>
+        <button type=\"submit\"{disabled}>更新密码</button>
     </form>
 </section>"##,
+        group_options = group_options_for_create,
+        group_options_assign = group_options_for_assign,
         user_options = user_options,
-        reset_disabled_attr = reset_disabled_attr
+        disabled = reset_disabled_attr,
+    );
+
+    let mut group_sections = String::new();
+    for group in &groups {
+        let mut module_fields = String::new();
+        for descriptor in usage::REGISTERED_MODULES {
+            let limit = group.limits.get(descriptor.key);
+            let units_value = limit
+                .and_then(|l| l.unit_limit)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let tokens_value = limit
+                .and_then(|l| l.token_limit)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+
+            module_fields.push_str(&format!(
+                r#"<div class=\"field-set\">
+        <h3>{title}</h3>
+        <div class=\"dual-inputs\">
+            <div class=\"field\">
+                <label for=\"units-{key}-{id}\">{unit_label}（近 7 日）</label>
+                <input id=\"units-{key}-{id}\" name=\"units_{key}\" value=\"{units}\" placeholder=\"留空表示不限\">
+            </div>
+            <div class=\"field\">
+                <label for=\"tokens-{key}-{id}\">令牌上限（近 7 日）</label>
+                <input id=\"tokens-{key}-{id}\" name=\"tokens_{key}\" value=\"{tokens}\" placeholder=\"留空表示不限\">
+            </div>
+        </div>
+    </div>"#,
+                title = escape_html(descriptor.label),
+                key = descriptor.key,
+                id = group.id,
+                unit_label = descriptor.unit_label,
+                units = escape_html(&units_value),
+                tokens = escape_html(&tokens_value),
+            ));
+        }
+
+        let desc_display = group
+            .description
+            .as_ref()
+            .map(|d| escape_html(d))
+            .unwrap_or_else(|| "无描述".to_string());
+        let desc_value = group
+            .description
+            .as_ref()
+            .map(|d| escape_html(d))
+            .unwrap_or_default();
+
+        group_sections.push_str(&format!(
+            r##"<section class=\"admin group-panel\">
+    <h2>额度组：{name}</h2>
+    <p class=\"meta-note\">{desc}</p>
+    <form method=\"post\" action=\"/dashboard/usage-groups\">
+        <input type=\"hidden\" name=\"group_id\" value=\"{id}\">
+        <div class=\"field\">
+            <label for=\"group-name-{id}\">组名称</label>
+            <input id=\"group-name-{id}\" name=\"name\" value=\"{name}\" required>
+        </div>
+        <div class=\"field\">
+            <label for=\"group-desc-{id}\">描述</label>
+            <input id=\"group-desc-{id}\" name=\"description\" value=\"{desc_value}\" placeholder=\"可选\">
+        </div>
+        {module_fields}
+        <div class=\"action-stack\">
+            <button type=\"submit\">保存额度</button>
+        </div>
+    </form>
+</section>"##,
+            id = group.id,
+            name = escape_html(&group.name),
+            desc = desc_display,
+            desc_value = desc_value,
+            module_fields = module_fields,
+        ));
+    }
+
+    let mut new_group_fields = String::new();
+    for descriptor in usage::REGISTERED_MODULES {
+        new_group_fields.push_str(&format!(
+            r#"<div class=\"field-set\">
+        <h3>{title}</h3>
+        <div class=\"dual-inputs\">
+            <div class=\"field\">
+                <label for=\"new-units-{key}\">{unit_label}（近 7 日）</label>
+                <input id=\"new-units-{key}\" name=\"units_{key}\" placeholder=\"留空表示不限\">
+            </div>
+            <div class=\"field\">
+                <label for=\"new-tokens-{key}\">令牌上限（近 7 日）</label>
+                <input id=\"new-tokens-{key}\" name=\"tokens_{key}\" placeholder=\"留空表示不限\">
+            </div>
+        </div>
+    </div>"#,
+            title = escape_html(descriptor.label),
+            unit_label = descriptor.unit_label,
+            key = descriptor.key,
+        ));
+    }
+
+    let new_group_section = format!(
+        r##"<section class=\"admin group-panel\">
+    <h2>新建额度组</h2>
+    <form method=\"post\" action=\"/dashboard/usage-groups\">
+        <div class=\"field\">
+            <label for=\"new-group-name\">组名称</label>
+            <input id=\"new-group-name\" name=\"name\" required>
+        </div>
+        <div class=\"field\">
+            <label for=\"new-group-desc\">描述</label>
+            <input id=\"new-group-desc\" name=\"description\" placeholder=\"可选\">
+        </div>
+        {new_group_fields}
+        <div class=\"action-stack\">
+            <button type=\"submit\">创建额度组</button>
+        </div>
+    </form>
+</section>"##,
+        new_group_fields = new_group_fields,
     );
 
     let footer = render_footer();
@@ -774,11 +1015,12 @@ async fn dashboard(
         .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
         main {{ padding: 2rem 1.5rem; max-width: 1100px; margin: 0 auto; box-sizing: border-box; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
-        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
+        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }}
         th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
         tr.current-user td {{ background: #eff6ff; }}
-        .meta {{ margin-top: 1.5rem; font-size: 0.95rem; color: #475569; }}
-        .meta-note {{ margin-bottom: 0.5rem; }}
+        .usage-grid {{ display: grid; gap: 0.6rem; }}
+        .usage-chip {{ display: flex; flex-direction: column; gap: 0.25rem; padding: 0.75rem; border-radius: 10px; border: 1px solid #e2e8f0; background: #ffffff; }}
+        .usage-chip .chip-title {{ font-weight: 600; color: #1d4ed8; }}
         .module-links {{ margin-top: 1rem; padding-left: 1.2rem; color: #475569; }}
         .module-links li {{ margin-bottom: 0.5rem; }}
         .module-links a {{ color: #2563eb; text-decoration: none; }}
@@ -789,12 +1031,19 @@ async fn dashboard(
         .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; }}
         .field input:focus, .field select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
         .field.checkbox {{ flex-direction: row; align-items: center; gap: 0.6rem; }}
+        .field-set {{ margin-bottom: 1.5rem; }}
+        .field-set h3 {{ margin: 0 0 0.75rem; color: #0f172a; font-size: 1rem; }}
+        .dual-inputs {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }}
+        .action-stack {{ display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }}
         button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
         button:hover {{ background: #1d4ed8; }}
         button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
         .flash {{ padding: 1rem; border-radius: 8px; margin-top: 1rem; border: 1px solid transparent; }}
         .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
         .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
+        .meta {{ margin-top: 1.5rem; font-size: 0.95rem; color: #475569; }}
+        .meta-note {{ margin-bottom: 0.5rem; }}
+        .group-panel {{ margin-top: 2.5rem; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
     </style>
 </head>
@@ -811,7 +1060,7 @@ async fn dashboard(
         {message_block}
         <table>
             <thead>
-                <tr><th>用户名</th><th>已用次数</th><th>调用上限</th><th>角色</th></tr>
+                <tr><th>用户名</th><th>额度组</th><th>角色</th><th>近 7 日使用</th></tr>
             </thead>
             <tbody>
                 {table_rows}
@@ -822,7 +1071,9 @@ async fn dashboard(
             <p>模块设置入口：</p>
             {module_links}
         </div>
-        {admin_controls}
+        {user_controls}
+        {group_sections}
+        {new_group}
         {footer}
     </main>
 </body>
@@ -833,7 +1084,9 @@ async fn dashboard(
         table_rows = table_rows,
         model_notes = model_notes,
         module_links = module_links,
-        admin_controls = admin_controls,
+        user_controls = user_controls,
+        group_sections = group_sections,
+        new_group = new_group_section,
         footer = footer,
     );
 
@@ -888,6 +1141,15 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
             "grader_prompts_saved" => {
                 return "<div class=\"flash success\">已更新稿件评估提示词。</div>".to_string();
             }
+            "group_created" => {
+                return "<div class=\"flash success\">已创建额度组。</div>".to_string();
+            }
+            "group_saved" => {
+                return "<div class=\"flash success\">已更新额度组。</div>".to_string();
+            }
+            "group_assigned" => {
+                return "<div class=\"flash success\">已更新用户额度组。</div>".to_string();
+            }
             _ => {}
         }
     }
@@ -916,6 +1178,11 @@ fn compose_flash_message(params: &DashboardQuery) -> String {
             "docx_invalid_prompts" => "请填写 DOCX 模块的提示文案。",
             "grader_invalid_models" => "请提供稿件评估模块的模型配置。",
             "grader_invalid_prompts" => "请填写稿件评估模块的提示文案。",
+            "group_missing" => "请选择有效的额度组。",
+            "group_invalid" => "额度组标识无效。",
+            "group_invalid_limit" => "额度上限需为非负整数。",
+            "group_duplicate" => "已存在同名额度组。",
+            "group_name_missing" => "请输入额度组名称。",
             _ => "发生未知错误，请查看日志。",
         };
 
@@ -2160,12 +2427,9 @@ async fn create_user(
         return Ok(Redirect::to("/dashboard?error=missing_password"));
     }
 
-    let usage_limit = match form.usage_limit.as_deref().map(str::trim) {
-        Some("") | None => None,
-        Some(value) => match value.parse::<i64>() {
-            Ok(parsed) if parsed >= 0 => Some(parsed),
-            _ => return Ok(Redirect::to("/dashboard?error=unknown")),
-        },
+    let group_id = match form.usage_group_id {
+        Some(id) => id,
+        None => return Ok(Redirect::to("/dashboard?error=group_missing")),
     };
 
     let is_admin = form.is_admin.is_some();
@@ -2179,12 +2443,12 @@ async fn create_user(
     };
 
     let result = sqlx::query(
-        "INSERT INTO users (id, username, password_hash, usage_limit, is_admin) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO users (id, username, password_hash, usage_group_id, is_admin) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(Uuid::new_v4())
     .bind(username)
     .bind(password_hash)
-    .bind(usage_limit)
+    .bind(group_id)
     .bind(is_admin)
     .execute(&state.pool)
     .await;
@@ -2193,6 +2457,9 @@ async fn create_user(
         Ok(_) => Ok(Redirect::to("/dashboard?status=created")),
         Err(sqlx::Error::Database(db_err)) if db_err.constraint() == Some("users_username_key") => {
             Ok(Redirect::to("/dashboard?error=duplicate"))
+        }
+        Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23503") => {
+            Ok(Redirect::to("/dashboard?error=group_missing"))
         }
         Err(err) => {
             error!(?err, "failed to create user");
@@ -2241,6 +2508,139 @@ async fn update_user_password(
             Ok(Redirect::to("/dashboard?error=unknown"))
         }
     }
+}
+
+async fn assign_user_group(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<AssignUserGroupForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+
+    let username = form.username.trim();
+    if username.is_empty() {
+        return Ok(Redirect::to("/dashboard?error=user_missing"));
+    }
+
+    let result = sqlx::query("UPDATE users SET usage_group_id = $2 WHERE username = $1")
+        .bind(username)
+        .bind(form.usage_group_id)
+        .execute(&state.pool)
+        .await;
+
+    match result {
+        Ok(res) if res.rows_affected() > 0 => Ok(Redirect::to("/dashboard?status=group_assigned")),
+        Ok(_) => Ok(Redirect::to("/dashboard?error=user_missing")),
+        Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23503") => {
+            Ok(Redirect::to("/dashboard?error=group_missing"))
+        }
+        Err(err) => {
+            error!(?err, "failed to assign usage group");
+            Ok(Redirect::to("/dashboard?error=unknown"))
+        }
+    }
+}
+
+async fn save_usage_group(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(mut form): Form<HashMap<String, String>>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+
+    let name = form.remove("name").unwrap_or_default().trim().to_string();
+    if name.is_empty() {
+        return Ok(Redirect::to("/dashboard?error=group_name_missing"));
+    }
+
+    let description = form
+        .remove("description")
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+
+    let group_id_value = form
+        .remove("group_id")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let (group_id, existing) = if let Some(raw) = group_id_value {
+        let parsed =
+            Uuid::parse_str(&raw).map_err(|_| Redirect::to("/dashboard?error=group_invalid"))?;
+        (parsed, true)
+    } else {
+        (Uuid::new_v4(), false)
+    };
+
+    let mut allocations: HashMap<String, (Option<i64>, Option<i64>)> = HashMap::new();
+    for module in usage::REGISTERED_MODULES {
+        let unit_key = format!("units_{}", module.key);
+        let token_key = format!("tokens_{}", module.key);
+
+        let unit_limit = match usage::parse_optional_limit(form.get(&unit_key).map(String::as_str))
+        {
+            Ok(value) => value,
+            Err(_) => return Ok(Redirect::to("/dashboard?error=group_invalid_limit")),
+        };
+        let token_limit =
+            match usage::parse_optional_limit(form.get(&token_key).map(String::as_str)) {
+                Ok(value) => value,
+                Err(_) => return Ok(Redirect::to("/dashboard?error=group_invalid_limit")),
+            };
+
+        allocations.insert(module.key.to_string(), (token_limit, unit_limit));
+    }
+
+    if existing {
+        let updated =
+            sqlx::query("UPDATE usage_groups SET name = $2, description = $3 WHERE id = $1")
+                .bind(group_id)
+                .bind(&name)
+                .bind(description.as_deref())
+                .execute(&state.pool)
+                .await
+                .map_err(|err| {
+                    if let sqlx::Error::Database(db_err) = &err {
+                        if db_err.code().as_deref() == Some("23505") {
+                            return Redirect::to("/dashboard?error=group_duplicate");
+                        }
+                    }
+                    error!(?err, "failed to update usage group");
+                    Redirect::to("/dashboard?error=unknown")
+                })?;
+
+        if updated.rows_affected() == 0 {
+            return Ok(Redirect::to("/dashboard?error=group_missing"));
+        }
+    } else {
+        if let Err(err) =
+            sqlx::query("INSERT INTO usage_groups (id, name, description) VALUES ($1, $2, $3)")
+                .bind(group_id)
+                .bind(&name)
+                .bind(description.as_deref())
+                .execute(&state.pool)
+                .await
+        {
+            if let sqlx::Error::Database(db_err) = &err {
+                if db_err.code().as_deref() == Some("23505") {
+                    return Ok(Redirect::to("/dashboard?error=group_duplicate"));
+                }
+            }
+            error!(?err, "failed to create usage group");
+            return Ok(Redirect::to("/dashboard?error=unknown"));
+        }
+    }
+
+    if let Err(err) = usage::upsert_group_limits(&state.pool, group_id, &allocations).await {
+        error!(?err, "failed to update usage group limits");
+        return Ok(Redirect::to("/dashboard?error=unknown"));
+    }
+
+    let status = if existing {
+        "group_saved"
+    } else {
+        "group_created"
+    };
+    Ok(Redirect::to(&format!("/dashboard?status={status}")))
 }
 
 async fn create_glossary_term(
@@ -2809,7 +3209,7 @@ async fn fetch_user_by_session(pool: &PgPool, token: Uuid) -> sqlx::Result<Optio
 
 async fn fetch_dashboard_users(pool: &PgPool) -> sqlx::Result<Vec<DashboardUserRow>> {
     sqlx::query_as::<_, DashboardUserRow>(
-        "SELECT username, usage_count, usage_limit, is_admin FROM users ORDER BY username",
+        "SELECT u.id, u.username, u.usage_group_id, ug.name AS usage_group_name, u.is_admin FROM users u JOIN usage_groups ug ON ug.id = u.usage_group_id ORDER BY u.username",
     )
     .fetch_all(pool)
     .await
@@ -2849,6 +3249,47 @@ pub(crate) async fn fetch_journal_topic_scores(
     )
     .fetch_all(pool)
     .await
+}
+
+async fn fetch_usage_groups_with_limits(pool: &PgPool) -> Result<Vec<UsageGroupDisplay>> {
+    let groups = sqlx::query_as::<_, UsageGroupRow>(
+        "SELECT id, name, description FROM usage_groups ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let group_ids: Vec<Uuid> = groups.iter().map(|group| group.id).collect();
+    let limit_map = usage::group_limits(pool, &group_ids).await?;
+
+    let displays = groups
+        .into_iter()
+        .map(|group| {
+            let limits = limit_map
+                .get(&group.id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(module, snapshot)| {
+                    (
+                        module,
+                        GroupLimitDisplay {
+                            token_limit: snapshot.token_limit,
+                            unit_limit: snapshot.unit_limit,
+                        },
+                    )
+                })
+                .collect();
+
+            UsageGroupDisplay {
+                id: group.id,
+                name: group.name,
+                description: group.description,
+                limits,
+            }
+        })
+        .collect();
+
+    Ok(displays)
 }
 
 fn init_tracing() {

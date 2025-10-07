@@ -29,6 +29,7 @@ use crate::{
     escape_html, fetch_glossary_terms,
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
+    usage::{self, MODULE_TRANSLATE_DOCX},
 };
 
 const STORAGE_ROOT: &str = "storage/translatedocx";
@@ -444,19 +445,14 @@ async fn create_job(
         ));
     };
 
-    if let Some(limit) = user.usage_limit {
-        let projected = user.usage_count + 1;
-        if projected > limit {
-            let _ = tokio_fs::remove_dir_all(&job_dir).await;
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiError::new("该账户已达到使用上限。")),
-            ));
-        }
+    let pool = state.pool();
+
+    if let Err(err) = usage::ensure_within_limits(&pool, user.id, MODULE_TRANSLATE_DOCX, 1).await {
+        let _ = tokio_fs::remove_dir_all(&job_dir).await;
+        return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
     }
 
-    let mut transaction = state
-        .pool()
+    let mut transaction = pool
         .begin()
         .await
         .map_err(|err| internal_error(err.into()))?;
@@ -888,23 +884,16 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
         .context("failed to finalize job record")?;
 
     if success_count > 0 {
-        let update_usage = sqlx::query(
-            "UPDATE users SET usage_count = usage_count + $2 WHERE id = $1 AND (usage_limit IS NULL OR usage_count + $2 <= usage_limit)",
+        if let Err(err) = usage::record_usage(
+            &pool,
+            job.user_id,
+            MODULE_TRANSLATE_DOCX,
+            translation_tokens_total,
+            success_count as i64,
         )
-        .bind(job.user_id)
-        .bind(success_count)
-        .execute(&pool)
         .await
-        .context("failed to increment user usage")?;
-
-        if update_usage.rows_affected() == 0 {
-            sqlx::query("UPDATE docx_jobs SET status = $2, status_detail = $3 WHERE id = $1")
-                .bind(job_id)
-                .bind(STATUS_FAILED)
-                .bind("Usage limit reached before completion.")
-                .execute(&pool)
-                .await
-                .ok();
+        {
+            error!(?err, "failed to record DOCX translator usage");
         }
     }
 
@@ -1362,8 +1351,6 @@ struct ProcessingDocumentRecord {
 struct SessionUser {
     id: Uuid,
     username: String,
-    usage_count: i64,
-    usage_limit: Option<i64>,
     is_admin: bool,
 }
 
@@ -1376,7 +1363,7 @@ async fn require_user(state: &AppState, jar: &CookieJar) -> Result<SessionUser, 
     let pool = state.pool();
 
     let user = sqlx::query_as::<_, SessionUser>(
-        "SELECT users.id, users.username, users.usage_count, users.usage_limit, users.is_admin FROM sessions INNER JOIN users ON users.id = sessions.user_id WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
+        "SELECT users.id, users.username, users.is_admin FROM sessions INNER JOIN users ON users.id = sessions.user_id WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
     )
     .bind(token)
     .fetch_optional(&pool)

@@ -31,6 +31,7 @@ use crate::{
     fetch_journal_references, fetch_journal_topic_scores, fetch_journal_topics,
     llm::{ChatMessage, LlmClient, LlmRequest, MessageRole},
     render_footer,
+    usage::{self, MODULE_GRADER},
 };
 
 const STORAGE_ROOT: &str = "storage/grader";
@@ -68,8 +69,6 @@ pub fn router() -> Router<AppState> {
 struct SessionUser {
     id: Uuid,
     username: String,
-    usage_count: i64,
-    usage_limit: Option<i64>,
     is_admin: bool,
 }
 
@@ -476,13 +475,8 @@ async fn create_job(
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
-    if let Some(limit) = user.usage_limit {
-        if user.usage_count + 1 > limit {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiError::new("该账户已达到使用上限。")),
-            ));
-        }
+    if let Err(err) = usage::ensure_within_limits(&state.pool(), user.id, MODULE_GRADER, 1).await {
+        return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
     }
 
     ensure_storage_root()
@@ -743,7 +737,7 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
 
     let llm = state.llm_client();
 
-    let grading_outcome = run_grading_sequence(
+    let (grading_outcome, grading_tokens) = run_grading_sequence(
         &pool,
         job_id,
         &llm,
@@ -781,7 +775,7 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     let scores = fetch_journal_topic_scores(&pool).await.unwrap_or_default();
     let score_map = build_score_map(&references, &scores);
 
-    let keyword_summary = run_keyword_selection(
+    let (keyword_summary, keyword_tokens) = run_keyword_selection(
         &llm,
         models.keyword_model.as_str(),
         &prompts.keyword_selection,
@@ -791,10 +785,13 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     .await
     .unwrap_or_else(|err| {
         error!(?err, %job_id, "keyword selection failed");
-        KeywordSummary {
-            main: None,
-            peripheral: Vec::new(),
-        }
+        (
+            KeywordSummary {
+                main: None,
+                peripheral: Vec::new(),
+            },
+            0,
+        )
     });
 
     if doc.is_docx {
@@ -811,27 +808,17 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
 
     let recommendation_json = serde_json::to_value(&recommendations).unwrap_or(json!([]));
 
+    let total_tokens = grading_tokens + keyword_tokens;
+
     let peripherals = if keyword_summary.peripheral.is_empty() {
         None
     } else {
         Some(keyword_summary.peripheral.clone())
     };
 
-    let usage_result = sqlx::query(
-        "UPDATE users SET usage_count = usage_count + $2 WHERE id = $1 AND (usage_limit IS NULL OR usage_count + $2 <= usage_limit)",
-    )
-    .bind(job.user_id)
-    .bind(1_i64)
-    .execute(&pool)
-    .await;
-
-    if let Ok(result) = usage_result {
-        if result.rows_affected() == 0 {
-            mark_job_failed(&pool, job_id, doc.id, "账户已达到使用上限，任务被终止。").await?;
-            return Ok(());
-        }
-    } else if let Err(err) = usage_result {
-        error!(?err, "failed to update usage count");
+    if let Err(err) = usage::record_usage(&pool, job.user_id, MODULE_GRADER, total_tokens, 1).await
+    {
+        error!(?err, "failed to record grader usage");
     }
 
     sqlx::query(
@@ -871,10 +858,11 @@ async fn run_grading_sequence(
     model: &str,
     system_prompt: &str,
     manuscript: &str,
-) -> Result<Option<GradingOutcome>> {
+) -> Result<(Option<GradingOutcome>, i64)> {
     let mut attempts_run = 0usize;
     let mut valid_scores: Vec<[f64; 6]> = Vec::new();
     let mut justifications: Vec<String> = Vec::new();
+    let mut token_total: i64 = 0;
 
     while attempts_run < MAX_ATTEMPTS && valid_scores.len() < TARGET_SUCCESSES {
         attempts_run += 1;
@@ -886,21 +874,24 @@ async fn run_grading_sequence(
         let request = build_grading_request(model, system_prompt, manuscript);
 
         match llm.execute(request).await {
-            Ok(response) => match parse_grading_response(&response.text) {
-                Ok(payload) => {
-                    let mut values = payload_to_array(&payload);
-                    normalize_scores(&mut values);
-                    if is_non_decreasing(&values) {
-                        valid_scores.push(values);
-                        if let Some(justification) = payload.justification {
-                            justifications.push(justification);
+            Ok(response) => {
+                token_total += response.token_usage.total_tokens as i64;
+                match parse_grading_response(&response.text) {
+                    Ok(payload) => {
+                        let mut values = payload_to_array(&payload);
+                        normalize_scores(&mut values);
+                        if is_non_decreasing(&values) {
+                            valid_scores.push(values);
+                            if let Some(justification) = payload.justification {
+                                justifications.push(justification);
+                            }
                         }
                     }
+                    Err(err) => {
+                        error!(?err, "failed to parse grading response");
+                    }
                 }
-                Err(err) => {
-                    error!(?err, "failed to parse grading response");
-                }
-            },
+            }
             Err(err) => {
                 error!(?err, "grader LLM call failed");
             }
@@ -921,7 +912,7 @@ async fn run_grading_sequence(
     }
 
     if valid_scores.len() < MIN_SUCCESSES {
-        return Ok(None);
+        return Ok((None, token_total));
     }
 
     let weighted_scores: Vec<f64> = valid_scores
@@ -952,14 +943,17 @@ async fn run_grading_sequence(
 
     let justification = justifications.into_iter().next();
 
-    Ok(Some(GradingOutcome {
-        per_level,
-        iqm_score: iqm,
-        attempts_run,
-        valid_runs: valid_scores.len(),
-        justification,
-        decision_reason,
-    }))
+    Ok((
+        Some(GradingOutcome {
+            per_level,
+            iqm_score: iqm,
+            attempts_run,
+            valid_runs: valid_scores.len(),
+            justification,
+            decision_reason,
+        }),
+        token_total,
+    ))
 }
 
 fn build_grading_request(model: &str, system_prompt: &str, manuscript: &str) -> LlmRequest {
@@ -1027,7 +1021,7 @@ fn interquartile_mean(values: &[f64]) -> (f64, Vec<usize>) {
     }
     let mut indices: Vec<usize> = (0..values.len()).collect();
     indices.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap());
-    let k = values.len() / 4;
+    let k = (values.len() + 3) / 4;
     let kept = if values.len() > 2 * k {
         indices[k..values.len() - k].to_vec()
     } else {
@@ -1048,12 +1042,15 @@ async fn run_keyword_selection(
     prompt_template: &str,
     topics: &[JournalTopicRow],
     manuscript: &str,
-) -> Result<KeywordSummary> {
+) -> Result<(KeywordSummary, i64)> {
     if topics.is_empty() {
-        return Ok(KeywordSummary {
-            main: None,
-            peripheral: Vec::new(),
-        });
+        return Ok((
+            KeywordSummary {
+                main: None,
+                peripheral: Vec::new(),
+            },
+            0,
+        ));
     }
 
     let keywords_list = topics
@@ -1085,6 +1082,8 @@ async fn run_keyword_selection(
         .execute(request)
         .await
         .map_err(|err| anyhow!("keyword selection call failed: {}", err))?;
+
+    let token_total = response.token_usage.total_tokens as i64;
 
     let payload: KeywordResponsePayload = serde_json::from_str(&response.text)
         .map_err(|err| anyhow!("invalid keyword JSON: {}", err))?;
@@ -1118,7 +1117,7 @@ async fn run_keyword_selection(
         peripheral.push(trimmed.to_string());
     }
 
-    Ok(KeywordSummary { main, peripheral })
+    Ok((KeywordSummary { main, peripheral }, token_total))
 }
 
 fn build_score_map(
@@ -1396,7 +1395,7 @@ async fn require_user(state: &AppState, jar: &CookieJar) -> Result<SessionUser, 
     let pool = state.pool();
 
     let user = sqlx::query_as::<_, SessionUser>(
-        "SELECT users.id, users.username, users.usage_count, users.usage_limit, users.is_admin FROM sessions INNER JOIN users ON users.id = sessions.user_id WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
+        "SELECT users.id, users.username, users.is_admin FROM sessions INNER JOIN users ON users.id = sessions.user_id WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
     )
     .bind(token)
     .fetch_optional(&pool)
