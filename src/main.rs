@@ -2,7 +2,7 @@ mod config;
 pub mod llm;
 mod modules;
 
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use argon2::Argon2;
@@ -27,9 +27,15 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::{
-    config::{ModelsConfig, PromptsConfig},
+    config::{
+        DocxTranslatorModels, DocxTranslatorPrompts, DocxTranslatorSettings, GraderModels,
+        GraderPrompts, GraderSettings, ModuleSettings, SummarizerModels, SummarizerPrompts,
+        SummarizerSettings, update_docx_models, update_docx_prompts, update_grader_models,
+        update_grader_prompts, update_summarizer_models, update_summarizer_prompts,
+    },
     llm::LlmClient,
 };
+use tokio::sync::RwLock;
 
 pub(crate) const SESSION_COOKIE: &str = "auth_token";
 const SESSION_TTL_DAYS: i64 = 7;
@@ -83,8 +89,7 @@ fn render_login_page() -> String {
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
-    models: Arc<ModelsConfig>,
-    prompts: Arc<PromptsConfig>,
+    settings: Arc<RwLock<ModuleSettings>>,
     llm: LlmClient,
 }
 
@@ -128,6 +133,8 @@ struct GlossaryCreateForm {
     target_term: String,
     #[serde(default)]
     notes: Option<String>,
+    #[serde(default)]
+    redirect: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -137,11 +144,100 @@ struct GlossaryUpdateForm {
     target_term: String,
     #[serde(default)]
     notes: Option<String>,
+    #[serde(default)]
+    redirect: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct GlossaryDeleteForm {
     id: Uuid,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JournalTopicUpsertForm {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JournalTopicDeleteForm {
+    id: Uuid,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JournalReferenceUpsertForm {
+    journal_name: String,
+    #[serde(default)]
+    reference_mark: Option<String>,
+    low_bound: String,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(flatten)]
+    scores: HashMap<String, String>,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JournalReferenceDeleteForm {
+    id: Uuid,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SummarizerModelForm {
+    summary_model: String,
+    translation_model: String,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SummarizerPromptForm {
+    research_summary: String,
+    general_summary: String,
+    translation: String,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DocxModelForm {
+    translation_model: String,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DocxPromptForm {
+    en_to_cn: String,
+    cn_to_en: String,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GraderModelForm {
+    grading_model: String,
+    keyword_model: String,
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GraderPromptForm {
+    grading_instructions: String,
+    keyword_selection: String,
+    #[serde(default)]
+    redirect: Option<String>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -173,6 +269,32 @@ pub(crate) struct GlossaryTermRow {
     pub(crate) notes: Option<String>,
 }
 
+#[derive(Clone, sqlx::FromRow)]
+pub(crate) struct JournalTopicRow {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    created_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub(crate) struct JournalReferenceRow {
+    id: Uuid,
+    journal_name: String,
+    reference_mark: Option<String>,
+    low_bound: f64,
+    notes: Option<String>,
+    _created_at: chrono::DateTime<Utc>,
+    _updated_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, sqlx::FromRow)]
+pub(crate) struct JournalTopicScoreRow {
+    journal_id: Uuid,
+    topic_id: Uuid,
+    score: i16,
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -199,8 +321,46 @@ async fn app_main() -> Result<()> {
         .route("/dashboard/glossary", post(create_glossary_term))
         .route("/dashboard/glossary/update", post(update_glossary_term))
         .route("/dashboard/glossary/delete", post(delete_glossary_term))
+        .route("/dashboard/modules/summarizer", get(summarizer_admin))
+        .route(
+            "/dashboard/modules/summarizer/models",
+            post(save_summarizer_models),
+        )
+        .route(
+            "/dashboard/modules/summarizer/prompts",
+            post(save_summarizer_prompts),
+        )
+        .route("/dashboard/modules/translatedocx", get(docx_admin))
+        .route(
+            "/dashboard/modules/translatedocx/models",
+            post(save_docx_models),
+        )
+        .route(
+            "/dashboard/modules/translatedocx/prompts",
+            post(save_docx_prompts),
+        )
+        .route("/dashboard/modules/grader", get(grader_admin))
+        .route("/dashboard/modules/grader/models", post(save_grader_models))
+        .route(
+            "/dashboard/modules/grader/prompts",
+            post(save_grader_prompts),
+        )
+        .route("/dashboard/journal-topics", post(upsert_journal_topic))
+        .route(
+            "/dashboard/journal-topics/delete",
+            post(delete_journal_topic),
+        )
+        .route(
+            "/dashboard/journal-references",
+            post(upsert_journal_reference),
+        )
+        .route(
+            "/dashboard/journal-references/delete",
+            post(delete_journal_reference),
+        )
         .merge(modules::summarizer::router())
         .merge(modules::translatedocx::router())
+        .merge(modules::grader::router())
         .with_state(state);
 
     let port: u16 = env::var("PORT")
@@ -220,10 +380,6 @@ async fn app_main() -> Result<()> {
 
 impl AppState {
     async fn new() -> Result<Self> {
-        let models_config =
-            ModelsConfig::load_default().context("failed to load models configuration")?;
-        let prompts_config =
-            PromptsConfig::load_default().context("failed to load prompts configuration")?;
         let database_url = env::var("DATABASE_URL").context("DATABASE_URL env var is missing")?;
 
         let llm_client = LlmClient::from_env().context("failed to initialize LLM client")?;
@@ -239,10 +395,16 @@ impl AppState {
             .await
             .context("failed to run database migrations")?;
 
+        ModuleSettings::ensure_defaults(&pool)
+            .await
+            .context("failed to seed default module settings")?;
+        let settings = ModuleSettings::load(&pool)
+            .await
+            .context("failed to load module settings")?;
+
         Ok(Self {
             pool,
-            models: Arc::new(models_config),
-            prompts: Arc::new(prompts_config),
+            settings: Arc::new(RwLock::new(settings)),
             llm: llm_client,
         })
     }
@@ -278,20 +440,36 @@ impl AppState {
         Ok(())
     }
 
-    fn models_config(&self) -> Arc<ModelsConfig> {
-        Arc::clone(&self.models)
-    }
-
-    fn prompts_config(&self) -> Arc<PromptsConfig> {
-        Arc::clone(&self.prompts)
-    }
-
     fn llm_client(&self) -> LlmClient {
         self.llm.clone()
     }
 
     fn pool(&self) -> PgPool {
         self.pool.clone()
+    }
+
+    async fn summarizer_settings(&self) -> Option<SummarizerSettings> {
+        let guard = self.settings.read().await;
+        guard.summarizer().cloned()
+    }
+
+    async fn translate_docx_settings(&self) -> Option<DocxTranslatorSettings> {
+        let guard = self.settings.read().await;
+        guard.translate_docx().cloned()
+    }
+
+    async fn grader_settings(&self) -> Option<GraderSettings> {
+        let guard = self.settings.read().await;
+        guard.grader().cloned()
+    }
+
+    async fn reload_settings(&self) -> Result<()> {
+        let latest = ModuleSettings::load(&self.pool)
+            .await
+            .context("failed to reload module settings")?;
+        let mut guard = self.settings.write().await;
+        *guard = latest;
+        Ok(())
     }
 }
 
@@ -510,76 +688,315 @@ async fn dashboard(
 
     let message_block = compose_flash_message(&params);
 
-    let admin_controls = if auth_user.is_admin {
-        let glossary_terms = match fetch_glossary_terms(&state.pool).await {
-            Ok(list) => list,
-            Err(err) => {
-                error!(?err, "failed to load glossary terms");
-                Vec::new()
+    let mut model_notes = String::new();
+    if let Some(settings) = state.summarizer_settings().await {
+        model_notes.push_str(&format!(
+            "<p class=\"meta-note\">摘要使用模型 <code>{summary}</code>，翻译使用模型 <code>{translation}</code>。</p>",
+            summary = escape_html(&settings.models.summary_model),
+            translation = escape_html(&settings.models.translation_model)
+        ));
+    }
+    if let Some(settings) = state.translate_docx_settings().await {
+        model_notes.push_str(&format!(
+            "<p class=\"meta-note\">DOCX 翻译使用模型 <code>{translation}</code>。</p>",
+            translation = escape_html(&settings.models.translation_model)
+        ));
+    }
+    if let Some(settings) = state.grader_settings().await {
+        model_notes.push_str(&format!(
+            "<p class=\"meta-note\">稿件评估使用模型 <code>{grading}</code>，关键词匹配使用模型 <code>{keyword}</code>。</p>",
+            grading = escape_html(&settings.models.grading_model),
+            keyword = escape_html(&settings.models.keyword_model)
+        ));
+    }
+
+    let module_links = "<ul class=\"module-links\">\n        <li><a href=\"/dashboard/modules/summarizer\">摘要与翻译模块设置</a></li>\n        <li><a href=\"/dashboard/modules/translatedocx\">DOCX 翻译模块设置</a></li>\n        <li><a href=\"/dashboard/modules/grader\">稿件评估模块设置</a></li>\n    </ul>";
+
+    let admin_controls = format!(
+        r##"<section class=\"admin\">
+    <h2>创建用户</h2>
+    <form method=\"post\" action=\"/dashboard/users\">
+        <div class=\"field\">
+            <label for=\"new-username\">用户名</label>
+            <input id=\"new-username\" name=\"username\" required>
+        </div>
+        <div class=\"field\">
+            <label for=\"new-password\">密码</label>
+            <input id=\"new-password\" type=\"password\" name=\"password\" required>
+        </div>
+        <div class=\"field\">
+            <label for=\"usage-limit\">调用上限（留空表示不限）</label>
+            <input id=\"usage-limit\" name=\"usage_limit\" placeholder=\"例如：250\">
+        </div>
+        <div class=\"field checkbox\">
+            <label><input type=\"checkbox\" name=\"is_admin\" value=\"on\"> 授予管理员权限</label>
+        </div>
+        <button type=\"submit\">创建用户</button>
+    </form>
+</section>
+<section class=\"admin\">
+    <h2>重置密码</h2>
+    <form method=\"post\" action=\"/dashboard/users/password\">
+        <div class=\"field\">
+            <label for=\"reset-username\">选择用户</label>
+            <select id=\"reset-username\" name=\"username\" required{reset_disabled_attr}>
+                {user_options}
+            </select>
+        </div>
+        <div class=\"field\">
+            <label for=\"reset-password\">新密码</label>
+            <input id=\"reset-password\" type=\"password\" name=\"password\" required{reset_disabled_attr}>
+        </div>
+        <button type=\"submit\"{reset_disabled_attr}>更新密码</button>
+    </form>
+</section>"##,
+        user_options = user_options,
+        reset_disabled_attr = reset_disabled_attr
+    );
+
+    let footer = render_footer();
+
+    let html = format!(
+        r##"<!DOCTYPE html>
+<html lang=\"zh-CN\">
+<head>
+    <meta charset=\"UTF-8\">
+    <title>管理后台</title>
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+    <meta name=\"robots\" content=\"noindex,nofollow\">
+    <style>
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
+        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
+        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        main {{ padding: 2rem 1.5rem; max-width: 1100px; margin: 0 auto; box-sizing: border-box; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
+        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
+        th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
+        tr.current-user td {{ background: #eff6ff; }}
+        .meta {{ margin-top: 1.5rem; font-size: 0.95rem; color: #475569; }}
+        .meta-note {{ margin-bottom: 0.5rem; }}
+        .module-links {{ margin-top: 1rem; padding-left: 1.2rem; color: #475569; }}
+        .module-links li {{ margin-bottom: 0.5rem; }}
+        .module-links a {{ color: #2563eb; text-decoration: none; }}
+        .module-links a:hover {{ text-decoration: underline; }}
+        .admin {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #ffffff; border: 1px solid #e2e8f0; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
+        .admin h2 {{ margin-top: 0; color: #1d4ed8; }}
+        .field {{ margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }}
+        .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; }}
+        .field input:focus, .field select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        .field.checkbox {{ flex-direction: row; align-items: center; gap: 0.6rem; }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+        .flash {{ padding: 1rem; border-radius: 8px; margin-top: 1rem; border: 1px solid transparent; }}
+        .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
+        .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+    </style>
+</head>
+<body>
+    <header>
+        <div class=\"header-bar\">
+            <h1>使用情况仪表盘</h1>
+            <a class=\"back-link\" href=\"/\">← 返回首页</a>
+        </div>
+        <p>管理账号额度，并进入各模块的配置页面。</p>
+    </header>
+    <main>
+        <p data-user-id=\"{auth_id}\">当前登录：<strong>{username}</strong>。</p>
+        {message_block}
+        <table>
+            <thead>
+                <tr><th>用户名</th><th>已用次数</th><th>调用上限</th><th>角色</th></tr>
+            </thead>
+            <tbody>
+                {table_rows}
+            </tbody>
+        </table>
+        <div class=\"meta\">
+            {model_notes}
+            <p>模块设置入口：</p>
+            {module_links}
+        </div>
+        {admin_controls}
+        {footer}
+    </main>
+</body>
+</html>"##,
+        auth_id = auth_user.id,
+        username = escape_html(&auth_user.username),
+        message_block = message_block,
+        table_rows = table_rows,
+        model_notes = model_notes,
+        module_links = module_links,
+        admin_controls = admin_controls,
+        footer = footer,
+    );
+
+    Ok(Html(html))
+}
+
+fn compose_flash_message(params: &DashboardQuery) -> String {
+    if let Some(status) = params.status.as_deref() {
+        match status {
+            "created" => {
+                return "<div class=\"flash success\">已成功创建用户。</div>".to_string();
             }
+            "password_updated" => {
+                return "<div class=\"flash success\">已更新密码。</div>".to_string();
+            }
+            "glossary_created" => {
+                return "<div class=\"flash success\">已新增术语。</div>".to_string();
+            }
+            "glossary_updated" => {
+                return "<div class=\"flash success\">已更新术语。</div>".to_string();
+            }
+            "glossary_deleted" => {
+                return "<div class=\"flash success\">已删除术语。</div>".to_string();
+            }
+            "topic_saved" => {
+                return "<div class=\"flash success\">已保存主题。</div>".to_string();
+            }
+            "topic_deleted" => {
+                return "<div class=\"flash success\">已删除主题。</div>".to_string();
+            }
+            "journal_saved" => {
+                return "<div class=\"flash success\">已保存期刊参考。</div>".to_string();
+            }
+            "journal_deleted" => {
+                return "<div class=\"flash success\">已删除期刊参考。</div>".to_string();
+            }
+            "summarizer_models_saved" => {
+                return "<div class=\"flash success\">已更新摘要模块模型。</div>".to_string();
+            }
+            "summarizer_prompts_saved" => {
+                return "<div class=\"flash success\">已更新摘要模块提示词。</div>".to_string();
+            }
+            "docx_models_saved" => {
+                return "<div class=\"flash success\">已更新 DOCX 模块模型。</div>".to_string();
+            }
+            "docx_prompts_saved" => {
+                return "<div class=\"flash success\">已更新 DOCX 模块提示词。</div>".to_string();
+            }
+            "grader_models_saved" => {
+                return "<div class=\"flash success\">已更新稿件评估模型。</div>".to_string();
+            }
+            "grader_prompts_saved" => {
+                return "<div class=\"flash success\">已更新稿件评估提示词。</div>".to_string();
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(error) = params.error.as_deref() {
+        let message = match error {
+            "duplicate" => "用户名已存在。",
+            "not_authorized" => "需要管理员权限。",
+            "missing_username" => "请输入用户名。",
+            "missing_password" => "请输入密码。",
+            "password_missing" => "请输入新密码。",
+            "user_missing" => "未找到该用户。",
+            "hash_failed" => "处理密码时出错，请重试。",
+            "glossary_missing_fields" => "请填写英文和中文术语。",
+            "glossary_duplicate" => "已存在相同英文术语。",
+            "glossary_not_found" => "未找到对应术语。",
+            "topic_missing_name" => "请填写主题名称。",
+            "topic_not_found" => "未找到对应主题。",
+            "journal_missing_name" => "请填写期刊名称。",
+            "journal_invalid_low" => "请输入有效的低区间数值。",
+            "journal_invalid_score" => "主题分值必须是 0-9 的整数。",
+            "journal_not_found" => "未找到对应期刊参考。",
+            "summarizer_invalid_models" => "请提供摘要模块所需的全部模型字段。",
+            "summarizer_invalid_prompts" => "请填写摘要模块的所有提示文案。",
+            "docx_invalid_models" => "请提供 DOCX 模块的模型配置。",
+            "docx_invalid_prompts" => "请填写 DOCX 模块的提示文案。",
+            "grader_invalid_models" => "请提供稿件评估模块的模型配置。",
+            "grader_invalid_prompts" => "请填写稿件评估模块的提示文案。",
+            _ => "发生未知错误，请查看日志。",
         };
 
-        let mut glossary_rows = String::new();
-        let mut glossary_select_options = String::new();
+        return format!("<div class=\"flash error\">{message}</div>");
+    }
 
-        if glossary_terms.is_empty() {
-            glossary_rows.push_str("<tr><td colspan=\"4\">尚未添加术语。</td></tr>");
-        } else {
-            for term in &glossary_terms {
-                let notes_display = term
-                    .notes
-                    .as_ref()
-                    .map(|n| escape_html(n))
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "—".to_string());
-                glossary_rows.push_str(&format!(
-                    r#"<tr><td>{en}</td><td>{cn}</td><td>{notes}</td><td>
+    String::new()
+}
+
+fn sanitize_redirect_path(input: Option<&str>) -> &'static str {
+    match input {
+        Some("/dashboard/modules/summarizer") => "/dashboard/modules/summarizer",
+        Some("/dashboard/modules/translatedocx") => "/dashboard/modules/translatedocx",
+        Some("/dashboard/modules/grader") => "/dashboard/modules/grader",
+        _ => "/dashboard",
+    }
+}
+
+fn render_glossary_section(terms: &[GlossaryTermRow], redirect: &str) -> String {
+    let mut rows = String::new();
+    let mut select_options = String::new();
+
+    if terms.is_empty() {
+        rows.push_str("<tr><td colspan=\\\"4\\\">尚未添加术语。</td></tr>");
+    } else {
+        for term in terms {
+            let notes_display = term
+                .notes
+                .as_ref()
+                .map(|n| escape_html(n))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "—".to_string());
+            rows.push_str(&format!(
+                r#"<tr><td>{en}</td><td>{cn}</td><td>{notes}</td><td>
     <form method="post" action="/dashboard/glossary/delete" onsubmit="return confirm('确定删除该术语？');">
         <input type="hidden" name="id" value="{id}">
+        <input type="hidden" name="redirect" value="{redirect}">
         <button type="submit" class="danger">删除</button>
     </form>
 </td></tr>"#,
-                    en = escape_html(&term.source_term),
-                    cn = escape_html(&term.target_term),
-                    notes = notes_display,
-                    id = term.id
-                ));
+                en = escape_html(&term.source_term),
+                cn = escape_html(&term.target_term),
+                notes = notes_display,
+                id = term.id,
+                redirect = redirect
+            ));
 
-                glossary_select_options.push_str(&format!(
-                    "<option value=\"{id}\">EN：{en} → CN：{cn}</option>",
-                    id = term.id,
-                    en = escape_html(&term.source_term),
-                    cn = escape_html(&term.target_term)
-                ));
-            }
+            select_options.push_str(&format!(
+                "<option value=\\\"{id}\\\">EN：{en} → CN：{cn}</option>",
+                id = term.id,
+                en = escape_html(&term.source_term),
+                cn = escape_html(&term.target_term)
+            ));
         }
+    }
 
-        let (glossary_select_options, glossary_update_disabled_attr) =
-            if glossary_select_options.is_empty() {
-                (
-                    "<option value=\"\" disabled selected>暂无可选术语</option>".to_string(),
-                    " disabled",
-                )
-            } else {
-                (glossary_select_options, "")
-            };
+    let (select_options, disabled_attr) = if select_options.is_empty() {
+        (
+            "<option value=\\\"\\\" disabled selected>暂无可选术语</option>".to_string(),
+            " disabled",
+        )
+    } else {
+        (select_options, "")
+    };
 
-        let glossary_section = format!(
-            r##"<section class="admin">
+    format!(
+        r##"<section class="admin">
     <h2>术语表管理</h2>
-    <p class="section-note">这些术语将用于翻译时的术语表以保持用词一致。</p>
+    <p class="section-note">该术语表同时用于摘要与 DOCX 翻译模块。</p>
     <div class="stack">
         <table class="glossary">
             <thead>
                 <tr><th>英文</th><th>中文</th><th>备注</th><th>操作</th></tr>
             </thead>
             <tbody>
-                {glossary_rows}
+                {rows}
             </tbody>
         </table>
         <div class="glossary-forms">
             <form method="post" action="/dashboard/glossary">
                 <h3>新增术语</h3>
+                <input type="hidden" name="redirect" value="{redirect}">
                 <div class="field">
                     <label for="glossary-source">英文术语</label>
                     <input id="glossary-source" name="source_term" required>
@@ -596,97 +1013,289 @@ async fn dashboard(
             </form>
             <form method="post" action="/dashboard/glossary/update">
                 <h3>更新术语</h3>
+                <input type="hidden" name="redirect" value="{redirect}">
                 <div class="field">
                     <label for="glossary-update-id">选择术语</label>
-                    <select id="glossary-update-id" name="id" required{glossary_update_disabled_attr}>
-                        {glossary_select_options}
+                    <select id="glossary-update-id" name="id" required{disabled_attr}>
+                        {select_options}
                     </select>
                 </div>
                 <div class="field">
-                    <label for="glossary-update-source">更新后的英文术语</label>
-                    <input id="glossary-update-source" name="source_term" required{glossary_update_disabled_attr}>
+                    <label for="glossary-update-source">更新后的英文</label>
+                    <input id="glossary-update-source" name="source_term" required{disabled_attr}>
                 </div>
                 <div class="field">
-                    <label for="glossary-update-target">更新后的中文术语</label>
-                    <input id="glossary-update-target" name="target_term" required{glossary_update_disabled_attr}>
+                    <label for="glossary-update-target">更新后的中文</label>
+                    <input id="glossary-update-target" name="target_term" required{disabled_attr}>
                 </div>
                 <div class="field">
                     <label for="glossary-update-notes">备注（可选）</label>
-                    <input id="glossary-update-notes" name="notes" placeholder="填写上下文或使用说明"{glossary_update_disabled_attr}>
+                    <input id="glossary-update-notes" name="notes" placeholder="填写上下文或使用说明"{disabled_attr}>
                 </div>
-                <button type="submit"{glossary_update_disabled_attr}>保存修改</button>
+                <button type="submit"{disabled_attr}>保存修改</button>
             </form>
         </div>
     </div>
 </section>"##,
-            glossary_rows = glossary_rows,
-            glossary_select_options = glossary_select_options,
-            glossary_update_disabled_attr = glossary_update_disabled_attr
-        );
+        rows = rows,
+        select_options = select_options,
+        disabled_attr = disabled_attr,
+        redirect = redirect,
+    )
+}
 
-        let mut controls = format!(
-            r##"<section class="admin">
-    <h2>创建用户</h2>
-    <form method="post" action="/dashboard/users">
-        <div class="field">
-            <label for="new-username">用户名</label>
-            <input id="new-username" name="username" required>
-        </div>
-        <div class="field">
-            <label for="new-password">密码</label>
-            <input id="new-password" type="password" name="password" required>
-        </div>
-        <div class="field">
-            <label for="usage-limit">调用上限（留空表示不限）</label>
-            <input id="usage-limit" name="usage_limit" placeholder="例如：250">
-        </div>
-        <div class="field checkbox">
-            <label><input type="checkbox" name="is_admin" value="on"> 授予管理员权限</label>
-        </div>
-        <button type="submit">创建用户</button>
-    </form>
-</section>
-<section class="admin">
-    <h2>重置密码</h2>
-    <form method="post" action="/dashboard/users/password">
-        <div class="field">
-            <label for="reset-username">选择用户</label>
-            <select id="reset-username" name="username" required{reset_disabled_attr}>
-                {user_options}
-            </select>
-        </div>
-        <div class="field">
-            <label for="reset-password">新密码</label>
-            <input id="reset-password" type="password" name="password" required{reset_disabled_attr}>
-        </div>
-        <button type="submit"{reset_disabled_attr}>更新密码</button>
-    </form>
-</section>"##,
-            user_options = user_options,
-            reset_disabled_attr = reset_disabled_attr
-        );
-        controls.push_str(&glossary_section);
-        controls
-    } else {
-        String::new()
+async fn require_admin_user(state: &AppState, jar: &CookieJar) -> Result<AuthUser, Redirect> {
+    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
+        return Err(Redirect::to("/login"));
     };
 
-    let models_config = state.models_config();
-    let mut model_notes = String::new();
-    if let Some(models) = models_config.summarizer() {
-        model_notes.push_str(&format!(
-            "<p class=\"meta-note\">摘要使用模型 <code>{summary}</code>，翻译使用模型 <code>{translation}</code>。</p>",
-            summary = escape_html(models.summary_model()),
-            translation = escape_html(models.translation_model())
-        ));
-    }
-    if let Some(models) = models_config.translate_docx() {
-        model_notes.push_str(&format!(
-            "<p class=\"meta-note\">DOCX 翻译使用模型 <code>{translation}</code>。</p>",
-            translation = escape_html(models.translation_model())
-        ));
+    let token = match Uuid::parse_str(token_cookie.value()) {
+        Ok(token) => token,
+        Err(_) => return Err(Redirect::to("/login")),
+    };
+
+    let auth_user = match fetch_user_by_session(&state.pool, token).await {
+        Ok(Some(user)) => user,
+        _ => return Err(Redirect::to("/login")),
+    };
+
+    if !auth_user.is_admin {
+        return Err(Redirect::to("/?error=not_authorized"));
     }
 
+    Ok(auth_user)
+}
+
+fn render_topic_section(topics: &[JournalTopicRow], redirect: &str) -> String {
+    let mut rows = String::new();
+
+    if topics.is_empty() {
+        rows.push_str("<tr><td colspan=\\\"4\\\">尚未添加主题。</td></tr>");
+    } else {
+        for topic in topics {
+            let description = topic
+                .description
+                .as_ref()
+                .map(|d| escape_html(d))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "—".to_string());
+            let created = topic.created_at.format("%Y-%m-%d");
+            rows.push_str(&format!(
+                r#"<tr><td>{name}</td><td>{description}</td><td>{created}</td><td>
+    <form method="post" action="/dashboard/journal-topics/delete" onsubmit="return confirm('确定删除该主题？');">
+        <input type="hidden" name="id" value="{id}">
+        <input type="hidden" name="redirect" value="{redirect}">
+        <button type="submit" class="danger">删除</button>
+    </form>
+</td></tr>"#,
+                name = escape_html(&topic.name),
+                description = description,
+                created = created,
+                id = topic.id,
+                redirect = redirect
+            ));
+        }
+    }
+
+    format!(
+        r##"<section class="admin">
+    <h2>主题管理</h2>
+    <p class="section-note">主题用于稿件关键词识别，可重复提交同名主题覆盖描述。</p>
+    <table>
+        <thead>
+            <tr><th>主题名称</th><th>描述</th><th>创建时间</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            {rows}
+        </tbody>
+    </table>
+    <form method="post" action="/dashboard/journal-topics">
+        <input type="hidden" name="redirect" value="{redirect}">
+        <h3>新增或更新主题</h3>
+        <div class="field">
+            <label for="topic-name">主题名称</label>
+            <input id="topic-name" name="name" required>
+        </div>
+        <div class="field">
+            <label for="topic-description">描述（可选）</label>
+            <input id="topic-description" name="description" placeholder="例如：用于描述简要范围">
+        </div>
+        <button type="submit">保存主题</button>
+    </form>
+</section>"##,
+        rows = rows,
+        redirect = redirect,
+    )
+}
+
+fn render_journal_section(
+    references: &[JournalReferenceRow],
+    topics: &[JournalTopicRow],
+    scores: &[JournalTopicScoreRow],
+    redirect: &str,
+) -> String {
+    use std::collections::{HashMap, HashSet};
+
+    let mut name_lookup: HashMap<Uuid, String> = HashMap::new();
+    for topic in topics {
+        name_lookup.insert(topic.id, topic.name.clone());
+    }
+
+    let valid_ids: HashSet<Uuid> = references.iter().map(|r| r.id).collect();
+    let mut scores_map: HashMap<Uuid, Vec<(String, i16)>> = HashMap::new();
+    for score in scores {
+        if !valid_ids.contains(&score.journal_id) {
+            continue;
+        }
+        if let Some(name) = name_lookup.get(&score.topic_id) {
+            scores_map
+                .entry(score.journal_id)
+                .or_default()
+                .push((name.clone(), score.score));
+        }
+    }
+
+    for values in scores_map.values_mut() {
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    let mut rows = String::new();
+    if references.is_empty() {
+        rows.push_str("<tr><td colspan=\\\"6\\\">尚未添加期刊参考。</td></tr>");
+    } else {
+        for reference in references {
+            let mark = reference
+                .reference_mark
+                .as_ref()
+                .map(|m| escape_html(m))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "—".to_string());
+            let notes = reference
+                .notes
+                .as_ref()
+                .map(|n| escape_html(n))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "—".to_string());
+            let score_display = scores_map
+                .get(&reference.id)
+                .map(|entries| {
+                    if entries.is_empty() {
+                        "—".to_string()
+                    } else {
+                        entries
+                            .iter()
+                            .map(|(name, score)| format!("{}：{}", escape_html(name), score))
+                            .collect::<Vec<_>>()
+                            .join("<br>")
+                    }
+                })
+                .unwrap_or_else(|| "—".to_string());
+
+            rows.push_str(&format!(
+                r#"<tr><td>{name}</td><td>{mark}</td><td>{low:.2}</td><td>{notes}</td><td>{scores}</td><td>
+    <form method="post" action="/dashboard/journal-references/delete" onsubmit="return confirm('确定删除该期刊参考？');">
+        <input type="hidden" name="id" value="{id}">
+        <input type="hidden" name="redirect" value="{redirect}">
+        <button type="submit" class="danger">删除</button>
+    </form>
+</td></tr>"#,
+                name = escape_html(&reference.journal_name),
+                mark = mark,
+                low = reference.low_bound,
+                notes = notes,
+                scores = score_display,
+                id = reference.id,
+                redirect = redirect
+            ));
+        }
+    }
+
+    let score_inputs = if topics.is_empty() {
+        "<p class=\\\"section-note\\\">暂无主题，请先添加主题后再录入分值。</p>".to_string()
+    } else {
+        let fields = topics
+            .iter()
+            .map(|topic| {
+                format!(
+                    r#"<div class=\"field compact\"><label for=\"score-{id}\">{name}</label><input id=\"score-{id}\" name=\"score_{id}\" type=\"number\" min=\"0\" max=\"9\" value=\"0\"></div>"#,
+                    id = topic.id,
+                    name = escape_html(&topic.name)
+                )
+            })
+            .collect::<String>();
+        format!(
+            "<div class=\\\"topic-grid\\\">{fields}</div>",
+            fields = fields
+        )
+    };
+
+    format!(
+        r##"<section class="admin">
+    <h2>期刊参考</h2>
+    <p class="section-note">该列表支撑稿件评估模块的期刊推荐逻辑。</p>
+    <table>
+        <thead>
+            <tr><th>期刊名称</th><th>参考标记</th><th>低区间阈值</th><th>备注</th><th>主题分值</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+            {rows}
+        </tbody>
+    </table>
+    <form method="post" action="/dashboard/journal-references">
+        <input type="hidden" name="redirect" value="{redirect}">
+        <h3>新增或更新期刊</h3>
+        <div class="field">
+            <label for="journal-name">期刊名称</label>
+            <input id="journal-name" name="journal_name" required>
+        </div>
+        <div class="field">
+            <label for="journal-mark">参考标记（可选）</label>
+            <input id="journal-mark" name="reference_mark" placeholder="例如：Level 3 或 2/3">
+        </div>
+        <div class="field">
+            <label for="journal-low">低区间阈值</label>
+            <input id="journal-low" name="low_bound" required placeholder="例如：37.5">
+        </div>
+        <div class="field">
+            <label for="journal-notes">备注（可选）</label>
+            <input id="journal-notes" name="notes" placeholder="简要说明">
+        </div>
+        {score_inputs}
+        <button type="submit">保存期刊</button>
+    </form>
+</section>"##,
+        rows = rows,
+        score_inputs = score_inputs,
+        redirect = redirect,
+    )
+}
+
+async fn summarizer_admin(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(params): Query<DashboardQuery>,
+) -> Result<Html<String>, Redirect> {
+    let auth_user = require_admin_user(&state, &jar).await?;
+    let settings = state.summarizer_settings().await;
+    let models = settings
+        .as_ref()
+        .map(|s| s.models.clone())
+        .unwrap_or_default();
+    let prompts = settings
+        .as_ref()
+        .map(|s| s.prompts.clone())
+        .unwrap_or_default();
+
+    let glossary_terms = fetch_glossary_terms(&state.pool)
+        .await
+        .unwrap_or_else(|err| {
+            error!(?err, "failed to load glossary terms");
+            Vec::new()
+        });
+
+    let message_block = compose_flash_message(&params);
+    let models_redirect = "/dashboard/modules/summarizer";
+    let glossary_html = render_glossary_section(&glossary_terms, models_redirect);
     let footer = render_footer();
 
     let html = format!(
@@ -694,7 +1303,406 @@ async fn dashboard(
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>管理后台</title>
+    <title>摘要模块设置</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <style>
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
+        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
+        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
+        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); margin-bottom: 2rem; }}
+        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
+        input[type="text"], textarea {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; font-family: inherit; }}
+        textarea {{ min-height: 140px; }}
+        input[type="text"]:focus, textarea:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        .flash {{ padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid transparent; }}
+        .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
+        .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
+        .note {{ color: #475569; font-size: 0.95rem; margin-bottom: 1rem; }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-bar">
+            <h1>摘要模块设置</h1>
+            <a class="back-link" href="/dashboard">← 返回管理后台</a>
+        </div>
+        <p>配置摘要与翻译调用的模型和提示词，术语表与 DOCX 模块共用。</p>
+    </header>
+    <main>
+        <p>当前登录：<strong>{username}</strong></p>
+        {message_block}
+        <section class="panel">
+            <h2>模型配置</h2>
+            <form method="post" action="/dashboard/modules/summarizer/models">
+                <input type="hidden" name="redirect" value="{models_redirect}">
+                <label for="summary-model">摘要模型</label>
+                <input id="summary-model" name="summary_model" type="text" value="{summary_model}" required>
+                <label for="translation-model">翻译模型</label>
+                <input id="translation-model" name="translation_model" type="text" value="{translation_model}" required>
+                <button type="submit">保存模型</button>
+            </form>
+        </section>
+        <section class="panel">
+            <h2>提示词配置</h2>
+            <form method="post" action="/dashboard/modules/summarizer/prompts">
+                <input type="hidden" name="redirect" value="{models_redirect}">
+                <label for="prompt-research">科研论文摘要提示</label>
+                <textarea id="prompt-research" name="research_summary" required>{research_prompt}</textarea>
+                <label for="prompt-general">其他文档摘要提示</label>
+                <textarea id="prompt-general" name="general_summary" required>{general_prompt}</textarea>
+                <label for="prompt-translation">翻译提示（需包含 {{GLOSSARY}} ）</label>
+                <textarea id="prompt-translation" name="translation" required>{translation_prompt}</textarea>
+                <button type="submit">保存提示词</button>
+            </form>
+        </section>
+        {glossary_html}
+        {footer}
+    </main>
+</body>
+</html>"##,
+        username = escape_html(&auth_user.username),
+        message_block = message_block,
+        models_redirect = models_redirect,
+        summary_model = escape_html(&models.summary_model),
+        translation_model = escape_html(&models.translation_model),
+        research_prompt = escape_html(&prompts.research_summary),
+        general_prompt = escape_html(&prompts.general_summary),
+        translation_prompt = escape_html(&prompts.translation),
+        glossary_html = glossary_html,
+        footer = footer,
+    );
+
+    Ok(Html(html))
+}
+
+async fn save_summarizer_models(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<SummarizerModelForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    let summary = form.summary_model.trim();
+    let translation = form.translation_model.trim();
+    if summary.is_empty() || translation.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=summarizer_invalid_models"
+        )));
+    }
+
+    let payload = SummarizerModels {
+        summary_model: summary.to_string(),
+        translation_model: translation.to_string(),
+    };
+
+    if let Err(err) = update_summarizer_models(&state.pool, &payload).await {
+        error!(?err, "failed to update summarizer models");
+        return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+    }
+
+    if let Err(err) = state.reload_settings().await {
+        error!(
+            ?err,
+            "failed to reload module settings after summarizer model update"
+        );
+    }
+
+    Ok(Redirect::to(&format!(
+        "{redirect_base}?status=summarizer_models_saved"
+    )))
+}
+
+async fn save_summarizer_prompts(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<SummarizerPromptForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    if form.research_summary.trim().is_empty()
+        || form.general_summary.trim().is_empty()
+        || form.translation.trim().is_empty()
+    {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=summarizer_invalid_prompts"
+        )));
+    }
+
+    if !form.translation.contains("{{GLOSSARY}}") {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=summarizer_invalid_prompts"
+        )));
+    }
+
+    let payload = SummarizerPrompts {
+        research_summary: form.research_summary.trim().to_string(),
+        general_summary: form.general_summary.trim().to_string(),
+        translation: form.translation.trim().to_string(),
+    };
+
+    if let Err(err) = update_summarizer_prompts(&state.pool, &payload).await {
+        error!(?err, "failed to update summarizer prompts");
+        return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+    }
+
+    if let Err(err) = state.reload_settings().await {
+        error!(
+            ?err,
+            "failed to reload module settings after summarizer prompt update"
+        );
+    }
+
+    Ok(Redirect::to(&format!(
+        "{redirect_base}?status=summarizer_prompts_saved"
+    )))
+}
+
+async fn docx_admin(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(params): Query<DashboardQuery>,
+) -> Result<Html<String>, Redirect> {
+    let auth_user = require_admin_user(&state, &jar).await?;
+    let settings = state.translate_docx_settings().await;
+    let models = settings
+        .as_ref()
+        .map(|s| s.models.clone())
+        .unwrap_or_default();
+    let prompts = settings
+        .as_ref()
+        .map(|s| s.prompts.clone())
+        .unwrap_or_default();
+
+    let glossary_terms = fetch_glossary_terms(&state.pool)
+        .await
+        .unwrap_or_else(|err| {
+            error!(?err, "failed to load glossary terms");
+            Vec::new()
+        });
+
+    let message_block = compose_flash_message(&params);
+    let redirect_base = "/dashboard/modules/translatedocx";
+    let glossary_html = render_glossary_section(&glossary_terms, redirect_base);
+    let footer = render_footer();
+
+    let html = format!(
+        r##"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>DOCX 模块设置</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <style>
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
+        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
+        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
+        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); margin-bottom: 2rem; }}
+        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
+        input[type="text"], textarea {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; font-family: inherit; }}
+        textarea {{ min-height: 140px; }}
+        input[type="text"]:focus, textarea:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        .flash {{ padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid transparent; }}
+        .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
+        .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
+        .note {{ color: #475569; font-size: 0.95rem; margin-bottom: 1rem; }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-bar">
+            <h1>DOCX 模块设置</h1>
+            <a class="back-link" href="/dashboard">← 返回管理后台</a>
+        </div>
+        <p>配置 DOCX 翻译调用的模型和提示词。术语表与摘要模块共用。</p>
+    </header>
+    <main>
+        <p>当前登录：<strong>{username}</strong></p>
+        {message_block}
+        <section class="panel">
+            <h2>模型配置</h2>
+            <form method="post" action="/dashboard/modules/translatedocx/models">
+                <input type="hidden" name="redirect" value="{redirect_base}">
+                <label for="docx-model">翻译模型</label>
+                <input id="docx-model" name="translation_model" type="text" value="{translation_model}" required>
+                <button type="submit">保存模型</button>
+            </form>
+        </section>
+        <section class="panel">
+            <h2>提示词配置</h2>
+            <form method="post" action="/dashboard/modules/translatedocx/prompts">
+                <input type="hidden" name="redirect" value="{redirect_base}">
+                <label for="docx-en-cn">英译中提示（需包含 {{GLOSSARY}} 与 {{PARAGRAPH_SEPARATOR}}）</label>
+                <textarea id="docx-en-cn" name="en_to_cn" required>{en_cn_prompt}</textarea>
+                <label for="docx-cn-en">中译英提示（需包含 {{GLOSSARY}} 与 {{PARAGRAPH_SEPARATOR}}）</label>
+                <textarea id="docx-cn-en" name="cn_to_en" required>{cn_en_prompt}</textarea>
+                <button type="submit">保存提示词</button>
+            </form>
+        </section>
+        {glossary_html}
+        {footer}
+    </main>
+</body>
+</html>"##,
+        username = escape_html(&auth_user.username),
+        message_block = message_block,
+        redirect_base = redirect_base,
+        translation_model = escape_html(&models.translation_model),
+        en_cn_prompt = escape_html(&prompts.en_to_cn),
+        cn_en_prompt = escape_html(&prompts.cn_to_en),
+        glossary_html = glossary_html,
+        footer = footer,
+    );
+
+    Ok(Html(html))
+}
+
+async fn save_docx_models(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<DocxModelForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    let model = form.translation_model.trim();
+    if model.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=docx_invalid_models"
+        )));
+    }
+
+    let payload = DocxTranslatorModels {
+        translation_model: model.to_string(),
+    };
+
+    if let Err(err) = update_docx_models(&state.pool, &payload).await {
+        error!(?err, "failed to update docx models");
+        return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+    }
+
+    if let Err(err) = state.reload_settings().await {
+        error!(
+            ?err,
+            "failed to reload module settings after docx model update"
+        );
+    }
+
+    Ok(Redirect::to(&format!(
+        "{redirect_base}?status=docx_models_saved"
+    )))
+}
+
+async fn save_docx_prompts(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<DocxPromptForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    let en_to_cn = form.en_to_cn.trim();
+    let cn_to_en = form.cn_to_en.trim();
+
+    let required = en_to_cn.is_empty()
+        || cn_to_en.is_empty()
+        || !en_to_cn.contains("{{GLOSSARY}}")
+        || !en_to_cn.contains("{{PARAGRAPH_SEPARATOR}}")
+        || !cn_to_en.contains("{{GLOSSARY}}")
+        || !cn_to_en.contains("{{PARAGRAPH_SEPARATOR}}");
+
+    if required {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=docx_invalid_prompts"
+        )));
+    }
+
+    let payload = DocxTranslatorPrompts {
+        en_to_cn: en_to_cn.to_string(),
+        cn_to_en: cn_to_en.to_string(),
+    };
+
+    if let Err(err) = update_docx_prompts(&state.pool, &payload).await {
+        error!(?err, "failed to update docx prompts");
+        return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+    }
+
+    if let Err(err) = state.reload_settings().await {
+        error!(
+            ?err,
+            "failed to reload module settings after docx prompt update"
+        );
+    }
+
+    Ok(Redirect::to(&format!(
+        "{redirect_base}?status=docx_prompts_saved"
+    )))
+}
+
+async fn grader_admin(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(params): Query<DashboardQuery>,
+) -> Result<Html<String>, Redirect> {
+    let auth_user = require_admin_user(&state, &jar).await?;
+    let settings = state.grader_settings().await;
+    let models = settings
+        .as_ref()
+        .map(|s| s.models.clone())
+        .unwrap_or_default();
+    let prompts = settings
+        .as_ref()
+        .map(|s| s.prompts.clone())
+        .unwrap_or_default();
+
+    let topics = fetch_journal_topics(&state.pool)
+        .await
+        .unwrap_or_else(|err| {
+            error!(?err, "failed to load journal topics");
+            Vec::new()
+        });
+    let references = fetch_journal_references(&state.pool)
+        .await
+        .unwrap_or_else(|err| {
+            error!(?err, "failed to load journal references");
+            Vec::new()
+        });
+    let topic_scores = fetch_journal_topic_scores(&state.pool)
+        .await
+        .unwrap_or_else(|err| {
+            error!(?err, "failed to load journal topic scores");
+            Vec::new()
+        });
+
+    let message_block = compose_flash_message(&params);
+    let redirect_base = "/dashboard/modules/grader";
+    let topic_html = render_topic_section(&topics, redirect_base);
+    let journal_html = render_journal_section(&references, &topics, &topic_scores, redirect_base);
+    let footer = render_footer();
+
+    let html = format!(
+        r##"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>稿件评估模块设置</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="robots" content="noindex,nofollow">
     <style>
@@ -705,86 +1713,150 @@ async fn dashboard(
         .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
         .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
         main {{ padding: 2rem 1.5rem; max-width: 1100px; margin: 0 auto; box-sizing: border-box; }}
+        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); margin-bottom: 2rem; }}
+        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
+        input[type="text"], textarea {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; font-family: inherit; }}
+        textarea {{ min-height: 160px; }}
+        input[type="text"]:focus, textarea:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        .flash {{ padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; border: 1px solid transparent; }}
+        .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
+        .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
         th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
         th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
-        tr.current-user td {{ background: #eff6ff; }}
-        a {{ color: #2563eb; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-        .meta {{ margin-top: 1.5rem; font-size: 0.95rem; color: #475569; }}
-        .meta-note {{ margin-bottom: 0.5rem; }}
-        .flash {{ padding: 1rem; border-radius: 8px; margin-top: 1rem; border: 1px solid transparent; }}
-        .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
-        .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
-        .admin {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #ffffff; border: 1px solid #e2e8f0; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
-        .admin h2 {{ margin-top: 0; color: #1d4ed8; }}
-        .admin h3 {{ margin-top: 0; color: #1d4ed8; font-size: 1.05rem; }}
-        .field {{ margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }}
-        .field input, .field select {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; }}
-        .field input:focus, .field select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
-        .field.checkbox {{ flex-direction: row; align-items: center; gap: 0.6rem; }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
-        button:hover {{ background: #1d4ed8; }}
-        button.danger {{ background: #ef4444; color: #ffffff; }}
-        button.danger:hover {{ background: #dc2626; }}
-        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
-        .section-note {{ margin-top: -0.5rem; margin-bottom: 1rem; color: #64748b; }}
-        .stack {{ display: flex; flex-direction: column; gap: 1.5rem; }}
-        table.glossary {{ margin-top: 0; }}
-        .glossary-forms {{ display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }}
-        .glossary-forms form {{ border: 1px solid #e2e8f0; border-radius: 12px; padding: 1rem; background: #f8fafc; box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.1); }}
-        .tools {{ margin-top: 2.5rem; padding: 1.5rem; border-radius: 12px; background: #ffffff; border: 1px solid #e2e8f0; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
-        .tools h2 {{ margin-top: 0; color: #1d4ed8; }}
-        .tools ul {{ list-style: none; margin: 0; padding: 0; }}
-        .tools li {{ margin-bottom: 0.5rem; }}
+        .topic-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
+        .field.compact input {{ width: 100%; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
     </style>
 </head>
 <body>
     <header>
         <div class="header-bar">
-            <h1>使用情况仪表盘</h1>
-            <a class="back-link" href="/">← 返回首页</a>
+            <h1>稿件评估模块设置</h1>
+            <a class="back-link" href="/dashboard">← 返回管理后台</a>
         </div>
-        <p>快速查看各账号的额度与后台任务。</p>
+        <p>配置稿件评估与期刊匹配使用的模型、提示词、主题与期刊阈值。</p>
     </header>
     <main>
-        <p data-user-id="{auth_user_id}">当前登录：<strong>{username}</strong>。</p>
+        <p>当前登录：<strong>{username}</strong></p>
         {message_block}
-        <table>
-            <thead>
-                <tr><th>用户名</th><th>已用次数</th><th>调用上限</th><th>角色</th></tr>
-            </thead>
-            <tbody>
-                {table_rows}
-            </tbody>
-        </table>
-        <div class="meta">
-            {model_notes}
-            <p>后续计划：扩展用户管理、日志记录和实时 LLM 监控。</p>
-        </div>
-        <section class="tools">
-            <h2>可用工具</h2>
-            <ul>
-                <li><a href="/tools/summarizer">文档摘要与翻译模块</a></li>
-                <li><a href="/tools/translatedocx">DOCX 文档翻译模块</a></li>
-            </ul>
+        <section class="panel">
+            <h2>模型配置</h2>
+            <form method="post" action="/dashboard/modules/grader/models">
+                <input type="hidden" name="redirect" value="{redirect_base}">
+                <label for="grader-model">评分模型</label>
+                <input id="grader-model" name="grading_model" type="text" value="{grading_model}" required>
+                <label for="keyword-model">关键词模型</label>
+                <input id="keyword-model" name="keyword_model" type="text" value="{keyword_model}" required>
+                <button type="submit">保存模型</button>
+            </form>
         </section>
-        {admin_controls}
+        <section class="panel">
+            <h2>提示词配置</h2>
+            <form method="post" action="/dashboard/modules/grader/prompts">
+                <input type="hidden" name="redirect" value="{redirect_base}">
+                <label for="grader-instructions">评分提示词</label>
+                <textarea id="grader-instructions" name="grading_instructions" required>{grading_prompt}</textarea>
+                <label for="keyword-selection">关键词识别提示词</label>
+                <textarea id="keyword-selection" name="keyword_selection" required>{keyword_prompt}</textarea>
+                <button type="submit">保存提示词</button>
+            </form>
+        </section>
+        {topic_html}
+        {journal_html}
         {footer}
     </main>
 </body>
 </html>"##,
         username = escape_html(&auth_user.username),
-        auth_user_id = auth_user.id,
         message_block = message_block,
-        table_rows = table_rows,
-        admin_controls = admin_controls,
-        model_notes = model_notes,
-        footer = footer
+        redirect_base = redirect_base,
+        grading_model = escape_html(&models.grading_model),
+        keyword_model = escape_html(&models.keyword_model),
+        grading_prompt = escape_html(&prompts.grading_instructions),
+        keyword_prompt = escape_html(&prompts.keyword_selection),
+        topic_html = topic_html,
+        journal_html = journal_html,
+        footer = footer,
     );
 
     Ok(Html(html))
+}
+
+async fn save_grader_models(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<GraderModelForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    let grading = form.grading_model.trim();
+    let keyword = form.keyword_model.trim();
+    if grading.is_empty() || keyword.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=grader_invalid_models"
+        )));
+    }
+
+    let payload = GraderModels {
+        grading_model: grading.to_string(),
+        keyword_model: keyword.to_string(),
+    };
+
+    if let Err(err) = update_grader_models(&state.pool, &payload).await {
+        error!(?err, "failed to update grader models");
+        return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+    }
+
+    if let Err(err) = state.reload_settings().await {
+        error!(
+            ?err,
+            "failed to reload module settings after grader model update"
+        );
+    }
+
+    Ok(Redirect::to(&format!(
+        "{redirect_base}?status=grader_models_saved"
+    )))
+}
+
+async fn save_grader_prompts(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<GraderPromptForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    if form.grading_instructions.trim().is_empty() || form.keyword_selection.trim().is_empty() {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=grader_invalid_prompts"
+        )));
+    }
+
+    let payload = GraderPrompts {
+        grading_instructions: form.grading_instructions.trim().to_string(),
+        keyword_selection: form.keyword_selection.trim().to_string(),
+    };
+
+    if let Err(err) = update_grader_prompts(&state.pool, &payload).await {
+        error!(?err, "failed to update grader prompts");
+        return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+    }
+
+    if let Err(err) = state.reload_settings().await {
+        error!(
+            ?err,
+            "failed to reload module settings after grader prompt update"
+        );
+    }
+
+    Ok(Redirect::to(&format!(
+        "{redirect_base}?status=grader_prompts_saved"
+    )))
 }
 
 async fn create_user(
@@ -792,53 +1864,37 @@ async fn create_user(
     jar: CookieJar,
     Form(form): Form<CreateUserForm>,
 ) -> Result<Redirect, Redirect> {
-    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
-        return Err(Redirect::to("/login"));
-    };
-
-    let token = match Uuid::parse_str(token_cookie.value()) {
-        Ok(token) => token,
-        Err(_) => return Err(Redirect::to("/login")),
-    };
-
-    let auth_user = match fetch_user_by_session(&state.pool, token).await {
-        Ok(Some(user)) => user,
-        _ => return Err(Redirect::to("/login")),
-    };
-
-    if !auth_user.is_admin {
-        return Ok(Redirect::to("/?error=not_authorized"));
-    }
+    let _admin = require_admin_user(&state, &jar).await?;
 
     let username = form.username.trim();
     if username.is_empty() {
         return Ok(Redirect::to("/dashboard?error=missing_username"));
     }
 
-    if form.password.trim().is_empty() {
+    let password = form.password.trim();
+    if password.is_empty() {
         return Ok(Redirect::to("/dashboard?error=missing_password"));
     }
 
-    let usage_limit: Option<i64> = form.usage_limit.as_ref().and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            trimmed.parse::<i64>().ok()
-        }
-    });
-
-    let password_hash = match hash_password(form.password.trim()) {
-        Ok(hash) => hash,
-        Err(err) => {
-            error!(?err, "failed to hash password when creating user");
-            return Ok(Redirect::to("/dashboard?error=hash_failed"));
-        }
+    let usage_limit = match form.usage_limit.as_deref().map(str::trim) {
+        Some("") | None => None,
+        Some(value) => match value.parse::<i64>() {
+            Ok(parsed) if parsed >= 0 => Some(parsed),
+            _ => return Ok(Redirect::to("/dashboard?error=unknown")),
+        },
     };
 
     let is_admin = form.is_admin.is_some();
 
-    let insert_result = sqlx::query(
+    let password_hash = match hash_password(password) {
+        Ok(hash) => hash,
+        Err(err) => {
+            error!(?err, "failed to hash password while creating user");
+            return Ok(Redirect::to("/dashboard?error=hash_failed"));
+        }
+    };
+
+    let result = sqlx::query(
         "INSERT INTO users (id, username, password_hash, usage_limit, is_admin) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(Uuid::new_v4())
@@ -849,13 +1905,13 @@ async fn create_user(
     .execute(&state.pool)
     .await;
 
-    match insert_result {
+    match result {
         Ok(_) => Ok(Redirect::to("/dashboard?status=created")),
         Err(sqlx::Error::Database(db_err)) if db_err.constraint() == Some("users_username_key") => {
             Ok(Redirect::to("/dashboard?error=duplicate"))
         }
         Err(err) => {
-            error!(?err, "failed to insert new user");
+            error!(?err, "failed to create user");
             Ok(Redirect::to("/dashboard?error=unknown"))
         }
     }
@@ -866,23 +1922,7 @@ async fn update_user_password(
     jar: CookieJar,
     Form(form): Form<UpdatePasswordForm>,
 ) -> Result<Redirect, Redirect> {
-    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
-        return Err(Redirect::to("/login"));
-    };
-
-    let token = match Uuid::parse_str(token_cookie.value()) {
-        Ok(token) => token,
-        Err(_) => return Err(Redirect::to("/login")),
-    };
-
-    let auth_user = match fetch_user_by_session(&state.pool, token).await {
-        Ok(Some(user)) => user,
-        _ => return Err(Redirect::to("/login")),
-    };
-
-    if !auth_user.is_admin {
-        return Ok(Redirect::to("/?error=not_authorized"));
-    }
+    let _admin = require_admin_user(&state, &jar).await?;
 
     let username = form.username.trim();
     if username.is_empty() {
@@ -924,45 +1964,25 @@ async fn create_glossary_term(
     jar: CookieJar,
     Form(form): Form<GlossaryCreateForm>,
 ) -> Result<Redirect, Redirect> {
-    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
-        return Err(Redirect::to("/login"));
-    };
+    let _admin = require_admin_user(&state, &jar).await?;
 
-    let token = match Uuid::parse_str(token_cookie.value()) {
-        Ok(token) => token,
-        Err(_) => return Err(Redirect::to("/login")),
-    };
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
 
-    let auth_user = match fetch_user_by_session(&state.pool, token).await {
-        Ok(Some(user)) => user,
-        _ => return Err(Redirect::to("/login")),
-    };
-
-    if !auth_user.is_admin {
-        return Ok(Redirect::to("/?error=not_authorized"));
-    }
-
-    let GlossaryCreateForm {
-        source_term,
-        target_term,
-        notes,
-    } = form;
-
-    let source_clean = source_term.trim().to_owned();
-    let target_clean = target_term.trim().to_owned();
+    let source_clean = form.source_term.trim().to_owned();
+    let target_clean = form.target_term.trim().to_owned();
 
     if source_clean.is_empty() || target_clean.is_empty() {
-        return Ok(Redirect::to("/dashboard?error=glossary_missing_fields"));
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=glossary_missing_fields"
+        )));
     }
 
-    let notes_clean = notes.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
+    let notes_clean = form
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
 
     let insert_result = sqlx::query(
         "INSERT INTO glossary_terms (id, source_term, target_term, notes) VALUES ($1, $2, $3, $4)",
@@ -975,15 +1995,19 @@ async fn create_glossary_term(
     .await;
 
     match insert_result {
-        Ok(_) => Ok(Redirect::to("/dashboard?status=glossary_created")),
+        Ok(_) => Ok(Redirect::to(&format!(
+            "{redirect_base}?status=glossary_created"
+        ))),
         Err(sqlx::Error::Database(db_err))
             if db_err.constraint() == Some("idx_glossary_terms_source_lower") =>
         {
-            Ok(Redirect::to("/dashboard?error=glossary_duplicate"))
+            Ok(Redirect::to(&format!(
+                "{redirect_base}?error=glossary_duplicate"
+            )))
         }
         Err(err) => {
-            error!(?err, "failed to create glossary term");
-            Ok(Redirect::to("/dashboard?error=unknown"))
+            error!(?err, "failed to insert glossary term");
+            Ok(Redirect::to(&format!("{redirect_base}?error=unknown")))
         }
     }
 }
@@ -993,51 +2017,29 @@ async fn update_glossary_term(
     jar: CookieJar,
     Form(form): Form<GlossaryUpdateForm>,
 ) -> Result<Redirect, Redirect> {
-    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
-        return Err(Redirect::to("/login"));
-    };
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
 
-    let token = match Uuid::parse_str(token_cookie.value()) {
-        Ok(token) => token,
-        Err(_) => return Err(Redirect::to("/login")),
-    };
-
-    let auth_user = match fetch_user_by_session(&state.pool, token).await {
-        Ok(Some(user)) => user,
-        _ => return Err(Redirect::to("/login")),
-    };
-
-    if !auth_user.is_admin {
-        return Ok(Redirect::to("/?error=not_authorized"));
-    }
-
-    let GlossaryUpdateForm {
-        id,
-        source_term,
-        target_term,
-        notes,
-    } = form;
-
-    let source_clean = source_term.trim().to_owned();
-    let target_clean = target_term.trim().to_owned();
+    let source_clean = form.source_term.trim().to_owned();
+    let target_clean = form.target_term.trim().to_owned();
 
     if source_clean.is_empty() || target_clean.is_empty() {
-        return Ok(Redirect::to("/dashboard?error=glossary_missing_fields"));
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=glossary_missing_fields"
+        )));
     }
 
-    let notes_clean = notes.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    });
+    let notes_clean = form
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     let update_result = sqlx::query(
-        "UPDATE glossary_terms SET source_term = $2, target_term = $3, notes = $4, updated_at = NOW() WHERE id = $1",
+        "UPDATE glossary_terms SET source_term = $2, target_term = $3, notes = $4 WHERE id = $1",
     )
-    .bind(id)
+    .bind(form.id)
     .bind(&source_clean)
     .bind(&target_clean)
     .bind(notes_clean.as_deref())
@@ -1045,18 +2047,22 @@ async fn update_glossary_term(
     .await;
 
     match update_result {
-        Ok(result) if result.rows_affected() > 0 => {
-            Ok(Redirect::to("/dashboard?status=glossary_updated"))
-        }
-        Ok(_) => Ok(Redirect::to("/dashboard?error=glossary_not_found")),
+        Ok(result) if result.rows_affected() > 0 => Ok(Redirect::to(&format!(
+            "{redirect_base}?status=glossary_updated"
+        ))),
+        Ok(_) => Ok(Redirect::to(&format!(
+            "{redirect_base}?error=glossary_not_found"
+        ))),
         Err(sqlx::Error::Database(db_err))
             if db_err.constraint() == Some("idx_glossary_terms_source_lower") =>
         {
-            Ok(Redirect::to("/dashboard?error=glossary_duplicate"))
+            Ok(Redirect::to(&format!(
+                "{redirect_base}?error=glossary_duplicate"
+            )))
         }
         Err(err) => {
             error!(?err, "failed to update glossary term");
-            Ok(Redirect::to("/dashboard?error=unknown"))
+            Ok(Redirect::to(&format!("{redirect_base}?error=unknown")))
         }
     }
 }
@@ -1066,23 +2072,8 @@ async fn delete_glossary_term(
     jar: CookieJar,
     Form(form): Form<GlossaryDeleteForm>,
 ) -> Result<Redirect, Redirect> {
-    let Some(token_cookie) = jar.get(SESSION_COOKIE) else {
-        return Err(Redirect::to("/login"));
-    };
-
-    let token = match Uuid::parse_str(token_cookie.value()) {
-        Ok(token) => token,
-        Err(_) => return Err(Redirect::to("/login")),
-    };
-
-    let auth_user = match fetch_user_by_session(&state.pool, token).await {
-        Ok(Some(user)) => user,
-        _ => return Err(Redirect::to("/login")),
-    };
-
-    if !auth_user.is_admin {
-        return Ok(Redirect::to("/?error=not_authorized"));
-    }
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
 
     let delete_result = sqlx::query("DELETE FROM glossary_terms WHERE id = $1")
         .bind(form.id)
@@ -1090,57 +2081,244 @@ async fn delete_glossary_term(
         .await;
 
     match delete_result {
-        Ok(result) if result.rows_affected() > 0 => {
-            Ok(Redirect::to("/dashboard?status=glossary_deleted"))
-        }
-        Ok(_) => Ok(Redirect::to("/dashboard?error=glossary_not_found")),
+        Ok(result) if result.rows_affected() > 0 => Ok(Redirect::to(&format!(
+            "{redirect_base}?status=glossary_deleted"
+        ))),
+        Ok(_) => Ok(Redirect::to(&format!(
+            "{redirect_base}?error=glossary_not_found"
+        ))),
         Err(err) => {
             error!(?err, "failed to delete glossary term");
-            Ok(Redirect::to("/dashboard?error=unknown"))
+            Ok(Redirect::to(&format!("{redirect_base}?error=unknown")))
         }
     }
 }
-fn compose_flash_message(params: &DashboardQuery) -> String {
-    if let Some(status) = params.status.as_deref() {
-        match status {
-            "created" => {
-                return "<div class=\"flash success\">已成功创建用户。</div>".to_string();
+
+async fn upsert_journal_topic(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<JournalTopicUpsertForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    let name = form.name.trim();
+    if name.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=topic_missing_name"
+        )));
+    }
+
+    let description = form
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    let result = sqlx::query(
+        "INSERT INTO journal_topics (id, name, description) VALUES ($1, $2, $3)
+         ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description",
+    )
+    .bind(Uuid::new_v4())
+    .bind(name)
+    .bind(description.as_deref())
+    .execute(&state.pool)
+    .await;
+
+    match result {
+        Ok(_) => Ok(Redirect::to(&format!("{redirect_base}?status=topic_saved"))),
+        Err(err) => {
+            error!(?err, "failed to upsert journal topic");
+            Ok(Redirect::to(&format!("{redirect_base}?error=unknown")))
+        }
+    }
+}
+
+async fn delete_journal_topic(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<JournalTopicDeleteForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    match sqlx::query("DELETE FROM journal_topics WHERE id = $1")
+        .bind(form.id)
+        .execute(&state.pool)
+        .await
+    {
+        Ok(result) if result.rows_affected() > 0 => Ok(Redirect::to(&format!(
+            "{redirect_base}?status=topic_deleted"
+        ))),
+        Ok(_) => Ok(Redirect::to(&format!(
+            "{redirect_base}?error=topic_not_found"
+        ))),
+        Err(err) => {
+            error!(?err, "failed to delete journal topic");
+            Ok(Redirect::to(&format!("{redirect_base}?error=unknown")))
+        }
+    }
+}
+
+async fn upsert_journal_reference(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<JournalReferenceUpsertForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    let name = form.journal_name.trim();
+    if name.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "{redirect_base}?error=journal_missing_name"
+        )));
+    }
+
+    let low_bound_value: f64 = match form.low_bound.trim().parse() {
+        Ok(value) => value,
+        Err(_) => {
+            return Ok(Redirect::to(&format!(
+                "{redirect_base}?error=journal_invalid_low"
+            )));
+        }
+    };
+
+    let reference_mark = form
+        .reference_mark
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let notes = form
+        .notes
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+
+    let mut parsed_scores = Vec::new();
+    for (key, value) in &form.scores {
+        if let Some(id_part) = key.strip_prefix("score_") {
+            if let Ok(topic_id) = Uuid::parse_str(id_part) {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let score: i16 = match trimmed.parse() {
+                    Ok(val) => val,
+                    Err(_) => {
+                        return Ok(Redirect::to(&format!(
+                            "{redirect_base}?error=journal_invalid_score"
+                        )));
+                    }
+                };
+
+                if !(0..=9).contains(&score) {
+                    return Ok(Redirect::to(&format!(
+                        "{redirect_base}?error=journal_invalid_score"
+                    )));
+                }
+
+                parsed_scores.push((topic_id, score));
             }
-            "password_updated" => {
-                return "<div class=\"flash success\">已更新密码。</div>".to_string();
-            }
-            "glossary_created" => {
-                return "<div class=\"flash success\">已新增术语。</div>".to_string();
-            }
-            "glossary_updated" => {
-                return "<div class=\"flash success\">已更新术语。</div>".to_string();
-            }
-            "glossary_deleted" => {
-                return "<div class=\"flash success\">已删除术语。</div>".to_string();
-            }
-            _ => {}
         }
     }
 
-    if let Some(error) = params.error.as_deref() {
-        let message = match error {
-            "duplicate" => "用户名已存在。",
-            "not_authorized" => "需要管理员权限。",
-            "missing_username" => "请输入用户名。",
-            "missing_password" => "请输入密码。",
-            "password_missing" => "请输入新密码。",
-            "user_missing" => "未找到该用户。",
-            "hash_failed" => "处理密码时出错，请重试。",
-            "glossary_missing_fields" => "请填写英文和中文术语。",
-            "glossary_duplicate" => "已存在相同英文术语。",
-            "glossary_not_found" => "未找到对应术语。",
-            _ => "发生未知错误，请查看日志。",
-        };
+    let mut transaction = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(err) => {
+            error!(?err, "failed to begin transaction for journal reference");
+            return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+        }
+    };
 
-        return format!("<div class=\"flash error\">{message}</div>");
+    let journal_id = match sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO journal_reference_entries (id, journal_name, reference_mark, low_bound, notes) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (journal_name)
+         DO UPDATE SET reference_mark = EXCLUDED.reference_mark,
+                       low_bound = EXCLUDED.low_bound,
+                       notes = EXCLUDED.notes,
+                       updated_at = NOW()
+         RETURNING id",
+    )
+    .bind(Uuid::new_v4())
+    .bind(name)
+    .bind(reference_mark.as_deref())
+    .bind(low_bound_value)
+    .bind(notes.as_deref())
+    .fetch_one(&mut *transaction)
+    .await
+    {
+        Ok(id) => id,
+        Err(err) => {
+            error!(?err, "failed to upsert journal reference entry");
+            let _ = transaction.rollback().await;
+            return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+        }
+    };
+
+    if let Err(err) = sqlx::query("DELETE FROM journal_topic_scores WHERE journal_id = $1")
+        .bind(journal_id)
+        .execute(&mut *transaction)
+        .await
+    {
+        error!(?err, "failed to clear existing journal topic scores");
+        let _ = transaction.rollback().await;
+        return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
     }
 
-    String::new()
+    for (topic_id, score) in parsed_scores.into_iter().filter(|(_, s)| *s > 0) {
+        if let Err(err) = sqlx::query(
+            "INSERT INTO journal_topic_scores (journal_id, topic_id, score) VALUES ($1, $2, $3)",
+        )
+        .bind(journal_id)
+        .bind(topic_id)
+        .bind(score)
+        .execute(&mut *transaction)
+        .await
+        {
+            error!(?err, "failed to insert journal topic score");
+            let _ = transaction.rollback().await;
+            return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+        }
+    }
+
+    if let Err(err) = transaction.commit().await {
+        error!(?err, "failed to commit journal reference transaction");
+        return Ok(Redirect::to(&format!("{redirect_base}?error=unknown")));
+    }
+
+    Ok(Redirect::to(&format!(
+        "{redirect_base}?status=journal_saved"
+    )))
+}
+
+async fn delete_journal_reference(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Form(form): Form<JournalReferenceDeleteForm>,
+) -> Result<Redirect, Redirect> {
+    let _admin = require_admin_user(&state, &jar).await?;
+    let redirect_base = sanitize_redirect_path(form.redirect.as_deref());
+
+    match sqlx::query("DELETE FROM journal_reference_entries WHERE id = $1")
+        .bind(form.id)
+        .execute(&state.pool)
+        .await
+    {
+        Ok(result) if result.rows_affected() > 0 => Ok(Redirect::to(&format!(
+            "{redirect_base}?status=journal_deleted"
+        ))),
+        Ok(_) => Ok(Redirect::to(&format!(
+            "{redirect_base}?error=journal_not_found"
+        ))),
+        Err(err) => {
+            error!(?err, "failed to delete journal reference entry");
+            Ok(Redirect::to(&format!("{redirect_base}?error=unknown")))
+        }
+    }
 }
 
 pub(crate) fn render_footer() -> String {
@@ -1166,6 +2344,11 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
             "DOCX 文档翻译",
             "上传 Word 文档，利用术语表逐段翻译。",
             "/tools/translatedocx",
+        ),
+        (
+            "稿件评估与期刊推荐",
+            "评估稿件投稿级别并给出匹配期刊建议。",
+            "/tools/grader",
         ),
     ];
 
@@ -1351,6 +2534,34 @@ async fn fetch_dashboard_users(pool: &PgPool) -> sqlx::Result<Vec<DashboardUserR
 pub(crate) async fn fetch_glossary_terms(pool: &PgPool) -> sqlx::Result<Vec<GlossaryTermRow>> {
     sqlx::query_as::<_, GlossaryTermRow>(
         "SELECT id, source_term, target_term, notes FROM glossary_terms ORDER BY LOWER(source_term)",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub(crate) async fn fetch_journal_topics(pool: &PgPool) -> sqlx::Result<Vec<JournalTopicRow>> {
+    sqlx::query_as::<_, JournalTopicRow>(
+        "SELECT id, name, description, created_at FROM journal_topics ORDER BY LOWER(name)",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub(crate) async fn fetch_journal_references(
+    pool: &PgPool,
+) -> sqlx::Result<Vec<JournalReferenceRow>> {
+    sqlx::query_as::<_, JournalReferenceRow>(
+        "SELECT id, journal_name, reference_mark, low_bound, notes, created_at, updated_at FROM journal_reference_entries ORDER BY low_bound",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+pub(crate) async fn fetch_journal_topic_scores(
+    pool: &PgPool,
+) -> sqlx::Result<Vec<JournalTopicScoreRow>> {
+    sqlx::query_as::<_, JournalTopicScoreRow>(
+        "SELECT journal_id, topic_id, score FROM journal_topic_scores",
     )
     .fetch_all(pool)
     .await

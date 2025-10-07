@@ -26,27 +26,14 @@
 - Call `client.execute(request).await?` to receive `LlmResponse` containing assistant text, provider info, raw JSON, and token counts (approximate when providers omit them).
 
 ## Model Configuration
-- All tool model selections live in `config/models.yaml`; override path with `MODELS_CONFIG_PATH` env var if needed.
-- Example schema:
-  ```yaml
-  modules:
-    summarizer:
-      summary_model: "openrouter/anthropic/claude-3-haiku"
-      translation_model: "openrouter/openai/gpt-4o-mini"
-    translate_docx:
-      translation_model: "openrouter/openai/gpt-4o-mini"
-  ```
-- `AppState` loads this once at startup; modules clone the config via `state.models_config()`.
-- When adding new modules, extend the `modules` map with a section matching the module name and any required model identifiers; keep keys snake_case to match Rust struct fields.
-- Configuration re-load requires application restart—there is no hot reload yet.
+- All module model selections are stored in the `module_configs` table under the `models` JSON column. Administrators manage these values from the dedicated module setting pages inside the dashboard.
+- The server seeds defaults on first boot (matching the old YAML values) via `ModuleSettings::ensure_defaults`. Subsequent edits happen through the web UI and persist in Postgres; YAML files now serve only as bootstrap defaults.
+- Updating models through the admin UI triggers an in-memory reload so changes take effect without restarting the service.
 
 ## Prompt Configuration
-- Prompt copy for modules is stored in `config/prompts.yaml`; override the path with `PROMPTS_CONFIG_PATH` if you need an alternate config per environment.
-- The config mirrors the models file: add a section under `modules` matching the module name and define named prompt strings (use multi-line blocks with `|-` for readability).
-- Summarizer translation copy lives under `translation` and must include the placeholder `{{GLOSSARY}}`, which is replaced at runtime with one EN -> CN pair per line. Omit the placeholder only if the prompt already explains how to reference a glossary.
-- DOCX translator prompts expose `en_to_cn` and `cn_to_en` strings under `modules.translate_docx`; each must include `{{GLOSSARY}}` and `{{PARAGRAPH_SEPARATOR}}` so the runtime can inject glossary lines and the paragraph boundary marker used for chunking.
-- Keep prompts trimmed of Markdown unless the downstream module explicitly renders Markdown; summarizer currently treats prompts as plain text.
-- As with the models config, any prompt changes require restarting the server so `AppState` reloads the YAML.
+- Prompt text shares the same `module_configs` table using the `prompts` JSON column. Each module has a dedicated admin page for editing prompt bodies (e.g. summarizer, DOCX translator, grader). Changes are persisted in Postgres and reloaded without a restart.
+- Validation guards remain: summarizer translation prompts must contain `{{GLOSSARY}}`; DOCX prompts must include both `{{GLOSSARY}}` and `{{PARAGRAPH_SEPARATOR}}`; grader keyword prompts must include `{{KEYWORDS}}`.
+- The server seeds initial defaults from the legacy YAML file on first run; afterwards only the admin UI controls these values.
 
 ## Summarizer Module
 - Routes mounted under `/tools/summarizer` (HTML form) and `/api/summarizer` (JSON/download endpoints).
@@ -67,9 +54,19 @@
 - Translated downloads live at `/api/translatedocx/jobs/{job}/{doc}/download/translated`.
 - Usage counting mirrors the summarizer: each successful document increments `users.usage_count`, and the job aborts if account limits would be exceeded.
 
+## Grader Module
+- Routes mounted under `/tools/grader` (HTML interface) and `/api/grader` (JSON status endpoint).
+- Users upload a single `.pdf`, `.docx`, or `.txt` manuscript; the background worker extracts text, performs up to 30 LLM grading attempts (stopping early once 12 valid runs are collected), and computes an interquartile-mean score with docx-specific penalty.
+- Keyword extraction runs on the same LLM (configured in `modules.grader.keyword_model`) and maps results against admin-managed topics to weight journal matches.
+- Periodic progress updates are written to `grader_jobs.status_detail`; the UI polls the JSON API until completion or failure. Results include IQM score, justification, keyword summary, and a sorted list of recommended journals.
+- Usage counting increments by one per successful job; jobs abort early if the projected usage would exceed a user's limit.
+- Admin dashboard提供专题与期刊参考管理表单：提交同名主题或期刊会覆盖原值，期刊分值会自动更新至推荐逻辑。
+
 ## Database
 - `migrations/0002_glossary.sql` creates `glossary_terms` with case-insensitive uniqueness on `source_term`.
 - `migrations/0003_summarizer.sql` adds `summary_jobs` and `summary_documents` for async processing metadata; indexes support job history lookups.
+- `migrations/0004_translatedocx.sql` and `0005_docx_direction.sql` track DOCX translation jobs/documents and persist chosen translation direction.
+- `migrations/0006_grader.sql` introduces `grader_jobs`, `grader_documents`, `journal_topics`, `journal_reference_entries`, and `journal_topic_scores`. Journal topics and reference rows are editable from the admin dashboard and are used by the grader module for keyword weighting and threshold adjustments.
 
 ## File System
 - Runtime artifacts persist under `storage/summarizer/`; `.gitignore` ignores this directory by default.

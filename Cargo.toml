@@ -21,7 +21,6 @@ dotenvy = "0.15"
 rand_core = "0.6"
 sqlx = { version = "0.7", features = ["runtime-tokio", "tls-native-tls", "macros", "postgres", "chrono", "uuid"] }
 cookie = "0.18"
-serde_yaml = "0.9"
 pdf-extract = "0.10"
 sanitize-filename = "0.5"
 zip = { version = "1.1", default-features = false, features = ["deflate"] }

@@ -92,6 +92,11 @@ async fn translatedocx_page(
     let user = require_user(&state, &jar).await?;
 
     let footer = render_footer();
+    let admin_link = if user.is_admin {
+        "<a class=\"admin-link\" href=\"/dashboard/modules/translatedocx\">模块管理</a>"
+    } else {
+        ""
+    };
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -117,6 +122,8 @@ async fn translatedocx_page(
         table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
         th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
         th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
+        .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
+        .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
         .status {{ margin-top: 1.5rem; }}
         .status p {{ margin: 0.25rem 0; }}
         .note {{ color: #475569; font-size: 0.95rem; }}
@@ -134,7 +141,10 @@ async fn translatedocx_page(
     <header>
         <div class="header-bar">
             <h1>DOCX 文档翻译</h1>
-            <a class="back-link" href="/">← 返回首页</a>
+            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+                <a class="back-link" href="/">← 返回首页</a>
+                {admin_link}
+            </div>
         </div>
         <p class="note">当前登录：<strong>{username}</strong>。上传 DOCX 文件，按照术语表进行精准翻译。</p>
     </header>
@@ -332,6 +342,7 @@ async fn translatedocx_page(
         completed = STATUS_COMPLETED,
         failed = STATUS_FAILED,
         footer = footer,
+        admin_link = admin_link,
     );
 
     Ok(Html(html))
@@ -666,16 +677,12 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     .context("failed to load job documents")?;
 
     let job_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
-    let models = state
-        .models_config()
-        .translate_docx()
-        .cloned()
-        .ok_or_else(|| anyhow!("DOCX translator model is not configured."))?;
-    let prompts = state
-        .prompts_config()
-        .translate_docx()
-        .cloned()
-        .ok_or_else(|| anyhow!("DOCX translator prompt is not configured."))?;
+    let settings = state
+        .translate_docx_settings()
+        .await
+        .ok_or_else(|| anyhow!("DOCX translator settings are not configured."))?;
+    let models = settings.models.clone();
+    let prompts = settings.prompts.clone();
 
     let glossary_terms = fetch_glossary_terms(&pool).await.unwrap_or_else(|err| {
         error!(?err, "failed to load glossary terms");
@@ -769,7 +776,7 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
             .await?;
 
             let request = build_translation_request(
-                models.translation_model(),
+                models.translation_model.as_str(),
                 translation_prompt.clone(),
                 &chunk.source_text,
                 direction,

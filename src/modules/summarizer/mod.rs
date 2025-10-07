@@ -61,6 +61,11 @@ async fn summarizer_page(
     let user = require_user(&state, &jar).await?;
 
     let footer = render_footer();
+    let admin_link = if user.is_admin {
+        "<a class=\"admin-link\" href=\"/dashboard/modules/summarizer\">模块管理</a>"
+    } else {
+        ""
+    };
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -92,6 +97,8 @@ async fn summarizer_page(
         .status {{ margin-top: 1.5rem; }}
         .status p {{ margin: 0.25rem 0; }}
         .note {{ color: #475569; font-size: 0.95rem; }}
+        .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
+        .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
         .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
         .downloads a:hover {{ text-decoration: underline; }}
         .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
@@ -106,7 +113,10 @@ async fn summarizer_page(
     <header>
         <div class="header-bar">
             <h1>文档摘要与翻译</h1>
-            <a class="back-link" href="/">← 返回首页</a>
+            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+                <a class="back-link" href="/">← 返回首页</a>
+                {admin_link}
+            </div>
         </div>
         <p class="note">当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 文件生成结构化摘要，并可输出中文译文。</p>
     </header>
@@ -299,6 +309,7 @@ async fn summarizer_page(
         completed = STATUS_COMPLETED,
         failed = STATUS_FAILED,
         footer = footer,
+        admin_link = admin_link,
     );
 
     Ok(Html(html))
@@ -921,16 +932,12 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     .context("failed to load job documents")?;
 
     let job_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
-    let models = state
-        .models_config()
-        .summarizer()
-        .cloned()
-        .ok_or_else(|| anyhow!("Summarizer models are not configured."))?;
-    let prompts = state
-        .prompts_config()
-        .summarizer()
-        .cloned()
-        .ok_or_else(|| anyhow!("Summarizer prompts are not configured."))?;
+    let settings = state
+        .summarizer_settings()
+        .await
+        .ok_or_else(|| anyhow!("Summarizer settings are not configured."))?;
+    let models = settings.models.clone();
+    let prompts = settings.prompts.clone();
 
     let glossary_terms = fetch_glossary_terms(&pool).await.unwrap_or_else(|err| {
         error!(?err, "failed to load glossary terms");
@@ -987,7 +994,8 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
         };
 
         let summary_prompt = document_prompt(&prompts, document_kind);
-        let summary_request = build_summary_request(models.summary_model(), summary_prompt, &text);
+        let summary_request =
+            build_summary_request(models.summary_model.as_str(), summary_prompt, &text);
         let summary_response = match llm_client.execute(summary_request).await {
             Ok(resp) => resp,
             Err(err) => {
@@ -1055,7 +1063,7 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
             .await?;
 
             let translation_request = build_translation_request(
-                models.translation_model(),
+                models.translation_model.as_str(),
                 translation_prompt.clone(),
                 &summary_text,
             );
