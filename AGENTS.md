@@ -19,7 +19,8 @@
 - Implement rate limiting per user based on usage metrics (requests/tokens) stored in persistent storage.
 
 ### Current Web Application Layout (2025-xx)
-- `src/web/` owns all HTTP-facing logic: `state.rs` (shared `AppState`), `landing.rs`, `auth.rs`, and `admin.rs` for dashboards/forms, plus `data.rs`, `models.rs`, and `templates.rs` for reusable queries and HTML.
+- `src/web/` owns all HTTP-facing logic: `state.rs` (shared `AppState`), `landing.rs`, `auth.rs`, and `admin.rs` (user & usage dashboards), plus `data.rs`, `models.rs`, and `templates.rs` for reusable queries and HTML.
+- Module-specific admin pages live alongside each tool (`src/modules/<tool>/admin.rs`) and register their settings routes from the module router; shared styling/widgets sit in `src/modules/admin_shared.rs` and helpers in `src/web/admin_utils.rs`.
 - `src/web/router.rs` builds the Axum `Router`, wiring auth, dashboard, and module routes (summarizer/translatedocx/grader) and serves `robots.txt`.
 - `src/main.rs` is now a thin bootstrap: initialize tracing, create `AppState`, call `web::router::build_router`, and start the server.
 - Downstream modules continue to consume shared helpers via re-exports in `src/web/mod.rs` (e.g., glossary/journal fetch helpers, `AppState`, HTML utilities).
@@ -28,7 +29,7 @@
 1. **Module skeleton**: create `src/modules/<tool>/mod.rs` with a `Router<AppState>` builder (`pub fn router() -> Router<AppState>`) exposing `/tools/<tool>` and any `/api/<tool>` endpoints. Follow the structure used by summarizer/translatedocx/grader (shared auth guards live in `web::auth`).
 2. **State/utilities**: use helpers from `AppState` (`state.pool()`/`state.llm_client()`) and shared usage accounting (`crate::usage`). Place module-specific SQL tables/migrations under `migrations/` with incremental numbering.
 3. **Configuration**: extend `ModuleSettings` in `src/config.rs` if the tool needs persisted model/prompt data. Seed defaults in `ensure_defaults`, update admin forms, and persist edits via new DB columns.
-4. **Admin UI wiring**: add settings pages under `web::admin` (HTML form + handlers) and expose routes in `web/router.rs`. Reuse existing CSS/partials (`MODULE_ADMIN_SHARED_STYLES`) and ensure POST handlers call `state.reload_settings()` after writes.
+4. **Admin UI wiring**: add a `modules::<tool>::admin` module to serve settings pages, wire its routes from the tool router, and reuse shared HTML helpers (`modules::admin_shared::MODULE_ADMIN_SHARED_STYLES`). POST handlers should call `state.reload_settings()` after writes.
 5. **Usage metering**: register the module in `src/usage.rs` (`REGISTERED_MODULES`) with proper unit/token labels and incorporate limit checks in the module’s request path.
 6. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool and add docs/tests as necessary.
 

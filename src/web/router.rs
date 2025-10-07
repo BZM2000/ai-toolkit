@@ -36,36 +36,6 @@ pub fn build_router(state: AppState) -> Router {
             post(admin::delete_glossary_term),
         )
         .route(
-            "/dashboard/modules/summarizer",
-            get(admin::summarizer_admin),
-        )
-        .route(
-            "/dashboard/modules/summarizer/models",
-            post(admin::save_summarizer_models),
-        )
-        .route(
-            "/dashboard/modules/summarizer/prompts",
-            post(admin::save_summarizer_prompts),
-        )
-        .route("/dashboard/modules/translatedocx", get(admin::docx_admin))
-        .route(
-            "/dashboard/modules/translatedocx/models",
-            post(admin::save_docx_models),
-        )
-        .route(
-            "/dashboard/modules/translatedocx/prompts",
-            post(admin::save_docx_prompts),
-        )
-        .route("/dashboard/modules/grader", get(admin::grader_admin))
-        .route(
-            "/dashboard/modules/grader/models",
-            post(admin::save_grader_models),
-        )
-        .route(
-            "/dashboard/modules/grader/prompts",
-            post(admin::save_grader_prompts),
-        )
-        .route(
             "/dashboard/journal-topics",
             post(admin::upsert_journal_topic),
         )

@@ -23,6 +23,8 @@ use tracing::error;
 use uuid::Uuid;
 use zip::ZipArchive;
 
+mod admin;
+
 use crate::{
     AppState, GlossaryTermRow,
     config::SummarizerPrompts,
@@ -52,6 +54,15 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/summarizer/jobs/:id/combined/:variant",
             get(download_combined_output),
+        )
+        .route("/dashboard/modules/summarizer", get(admin::settings_page))
+        .route(
+            "/dashboard/modules/summarizer/models",
+            post(admin::save_models),
+        )
+        .route(
+            "/dashboard/modules/summarizer/prompts",
+            post(admin::save_prompts),
         )
 }
 

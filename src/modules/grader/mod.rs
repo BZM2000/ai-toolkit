@@ -26,6 +26,8 @@ use tracing::error;
 use uuid::Uuid;
 use zip::ZipArchive;
 
+mod admin;
+
 use crate::{
     AppState, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow, escape_html,
     fetch_journal_references, fetch_journal_topic_scores, fetch_journal_topics,
@@ -63,6 +65,12 @@ pub fn router() -> Router<AppState> {
         .route("/tools/grader", get(grader_page))
         .route("/tools/grader/jobs", post(create_job))
         .route("/api/grader/jobs/:id", get(job_status))
+        .route("/dashboard/modules/grader", get(admin::settings_page))
+        .route("/dashboard/modules/grader/models", post(admin::save_models))
+        .route(
+            "/dashboard/modules/grader/prompts",
+            post(admin::save_prompts),
+        )
 }
 
 #[derive(sqlx::FromRow, Clone)]

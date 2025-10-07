@@ -23,6 +23,8 @@ use tracing::error;
 use uuid::Uuid;
 use zip::ZipArchive;
 
+mod admin;
+
 use crate::{
     AppState, GlossaryTermRow,
     config::DocxTranslatorPrompts,
@@ -83,6 +85,18 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/translatedocx/jobs/:id/documents/:doc_id/download/:variant",
             get(download_document_output),
+        )
+        .route(
+            "/dashboard/modules/translatedocx",
+            get(admin::settings_page),
+        )
+        .route(
+            "/dashboard/modules/translatedocx/models",
+            post(admin::save_models),
+        )
+        .route(
+            "/dashboard/modules/translatedocx/prompts",
+            post(admin::save_prompts),
         )
 }
 
