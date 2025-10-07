@@ -353,61 +353,125 @@ pub async fn dashboard(
     <meta name="robots" content="noindex,nofollow">
     <style>
         :root {{ color-scheme: light; }}
-        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
-        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; line-height: 1.6; }}
+        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05); }}
         .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: all 0.2s ease; }}
         .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
-        main {{ padding: 2rem 1.5rem; max-width: 1080px; margin: 0 auto; box-sizing: border-box; }}
-        table {{ width: 100%; border-collapse: collapse; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
-        thead {{ background: #f1f5f9; }}
-        th, td {{ padding: 0.95rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
-        tr.user-row {{ cursor: pointer; transition: background 0.15s ease; }}
+        .back-link:focus {{ outline: none; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2); }}
+        main {{ padding: 2rem 1.5rem; max-width: 1200px; margin: 0 auto; }}
+
+        /* Table styles with responsive wrapper */
+        .table-wrapper {{ width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); }}
+        table {{ width: 100%; min-width: 800px; border-collapse: collapse; }}
+        thead {{ background: linear-gradient(to bottom, #f8fafc, #f1f5f9); }}
+        th {{ padding: 1rem 1rem; border-bottom: 2px solid #e2e8f0; text-align: left; font-weight: 700; color: #475569; font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+        td {{ padding: 1rem 1rem; border-bottom: 1px solid #e2e8f0; }}
+        tr.user-row {{ cursor: pointer; transition: all 0.2s ease; }}
         tr.user-row:hover {{ background: #f8fafc; }}
         tr.user-row.expanded {{ background: #dbeafe; }}
         tr.user-row.current-user {{ border-left: 4px solid #2563eb; }}
-        tr.user-detail-row td {{ background: #f8fafc; }}
+        tr.user-detail-row td {{ background: #f8fafc; padding: 1.5rem; }}
+        .expand-icon {{ display: inline-block; transition: transform 0.2s ease; font-size: 0.75rem; color: #64748b; }}
+        tr.user-row.expanded .expand-icon {{ transform: rotate(90deg); }}
         .usage-summary {{ font-weight: 600; color: #1e293b; }}
-        .usage-grid {{ display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }}
-        .usage-chip {{ background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 12px; padding: 0.85rem; display: flex; flex-direction: column; gap: 0.4rem; }}
-        .usage-chip .chip-title {{ font-weight: 600; color: #1d4ed8; }}
-        .admin {{ margin-top: 2rem; padding: 2rem; background: #ffffff; border-radius: 12px; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); border: 1px solid #e2e8f0; }}
-        .collapsible-section {{ border: none; padding: 0; }}
-        .section-header {{ margin: 0; padding: 1rem 1.25rem; background: #f1f5f9; border-bottom: 1px solid #e2e8f0; cursor: pointer; display: flex; align-items: center; gap: 0.5rem; font-size: 1.05rem; }}
-        .section-header:hover {{ background: #e2e8f0; }}
-        .toggle-icon {{ font-size: 0.85rem; color: #475569; }}
-        .section-content {{ padding: 1.5rem 1.25rem; display: none; flex-direction: column; gap: 1.75rem; }}
-        .section-content.collapsed {{ display: none; }}
-        .section-content:not(.collapsed) {{ display: flex; }}
-        .field-set {{ padding: 1.5rem; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; }}
-        .dual-inputs {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }}
-        .field {{ display: flex; flex-direction: column; gap: 0.35rem; }}
-        .field label {{ font-weight: 600; color: #0f172a; }}
-        .field input {{ padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #ffffff; color: #0f172a; }}
-        .field input:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
-        .meta-note {{ margin-bottom: 0.5rem; color: #64748b; font-size: 0.95rem; }}
-        .group-panel {{ margin-top: 1rem; margin-bottom: 1rem; border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff; }}
-        .group-panel .section-header {{ border-radius: 12px; margin: 0; }}
-        .group-panel .section-content {{ border-radius: 0 0 12px 12px; }}
-        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        .usage-grid {{ display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }}
+        .usage-chip {{ background: linear-gradient(to bottom, #ffffff, #f8fafc); border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; display: flex; flex-direction: column; gap: 0.5rem; transition: all 0.2s ease; }}
+        .usage-chip:hover {{ border-color: #cbd5e1; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05); }}
+        .usage-chip .chip-title {{ font-weight: 600; color: #1d4ed8; font-size: 0.875rem; }}
+
+        /* Button styles */
+        button {{ font-family: inherit; cursor: pointer; transition: all 0.2s ease; border: none; font-size: 0.9375rem; }}
+        button:disabled {{ opacity: 0.5; cursor: not-allowed; }}
+        .btn-primary {{ padding: 0.75rem 1.5rem; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }}
+        .btn-primary:hover:not(:disabled) {{ background: #1d4ed8; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.3); }}
+        .btn-primary:focus {{ outline: none; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2); }}
+        .btn-sm {{ padding: 0.5rem 1rem; border-radius: 6px; background: #64748b; color: #ffffff; font-weight: 500; font-size: 0.875rem; }}
+        .btn-sm:hover:not(:disabled) {{ background: #475569; }}
+        .btn-sm:focus {{ outline: none; box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.2); }}
+        .btn-warning {{ background: #f59e0b; color: #ffffff; padding: 0.5rem 1rem; border-radius: 6px; font-weight: 500; font-size: 0.875rem; }}
+        .btn-warning:hover:not(:disabled) {{ background: #d97706; box-shadow: 0 2px 4px rgba(245, 158, 11, 0.3); }}
+        .btn-warning:focus {{ outline: none; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2); }}
+
+        /* Form styles */
+        .field {{ display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; }}
+        .field label {{ font-weight: 600; color: #0f172a; font-size: 0.9375rem; }}
+        .field input[type="text"],
+        .field input[type="password"],
+        .field input:not([type]) {{ padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 1rem; transition: all 0.2s ease; width: 100%; }}
+        .field input[type="text"]:hover,
+        .field input[type="password"]:hover,
+        .field input:not([type]):hover {{ border-color: #94a3b8; }}
+        .field input[type="text"]:focus,
+        .field input[type="password"]:focus,
+        .field input:not([type]):focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        .field input[type="text"]::placeholder,
+        .field input[type="password"]::placeholder,
+        .field input:not([type])::placeholder {{ color: #94a3b8; }}
+        .field select {{ padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 1rem; cursor: pointer; transition: all 0.2s ease; width: 100%; }}
+        .field select:hover {{ border-color: #94a3b8; }}
+        .field select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        .field.checkbox {{ flex-direction: row; align-items: center; gap: 0.75rem; }}
+        .field.checkbox label {{ margin: 0; font-weight: 500; }}
+        .field input[type="checkbox"] {{ width: 1.25rem; height: 1.25rem; cursor: pointer; border: 2px solid #cbd5e1; border-radius: 4px; }}
+        .field input[type="checkbox"]:focus {{ outline: none; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2); }}
+        .field-set {{ padding: 1.5rem; border: 1px solid #e2e8f0; border-radius: 12px; background: #f8fafc; margin-bottom: 1.5rem; }}
+        .field-set h3 {{ margin: 0 0 1rem 0; color: #1e293b; font-size: 1.125rem; font-weight: 600; }}
+        .dual-inputs {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; }}
         .inline-form {{ margin: 0; display: inline; }}
-        .inline-select {{ padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 0.9rem; cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }}
+        .inline-select {{ padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 0.875rem; cursor: pointer; transition: all 0.2s ease; }}
         .inline-select:hover {{ border-color: #94a3b8; }}
         .inline-select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
-        .btn-warning {{ background: #f59e0b; color: #ffffff; margin-left: 0.5rem; }}
-        .btn-warning:hover {{ background: #d97706; }}
-        .actions {{ display: flex; gap: 0.5rem; justify-content: flex-end; }}
-        .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); }}
-        .modal-content {{ background: #ffffff; margin: 10% auto; padding: 2rem; border-radius: 12px; max-width: 400px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }}
-        .modal-content.modal-large {{ max-width: 600px; max-height: 80vh; overflow-y: auto; }}
-        .modal-header {{ margin-bottom: 1.5rem; }}
-        .modal-header h3 {{ margin: 0; color: #0f172a; }}
-        .modal-actions {{ display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; }}
-        .modal-actions button {{ padding: 0.75rem 1.25rem; }}
-        .admin-actions {{ margin: 1.5rem 0; display: flex; gap: 0.75rem; flex-wrap: wrap; }}
-        .btn-primary {{ padding: 0.85rem 1.5rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; font-size: 1rem; }}
-        .btn-primary:hover {{ background: #1d4ed8; }}
+
+        /* Admin section styles */
+        .admin {{ margin-top: 2rem; padding: 2rem; background: #ffffff; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); border: 1px solid #e2e8f0; }}
+        .admin h2 {{ margin-top: 0; margin-bottom: 1.5rem; color: #1e293b; font-size: 1.5rem; font-weight: 700; }}
+        .collapsible-section {{ border: none; padding: 0; }}
+        .section-header {{ margin: 0; padding: 1rem 1.25rem; background: #f1f5f9; border-bottom: 1px solid #e2e8f0; cursor: pointer; display: flex; align-items: center; gap: 0.75rem; font-size: 1.05rem; transition: all 0.2s ease; }}
+        .section-header:hover {{ background: #e2e8f0; }}
+        .section-header:focus {{ outline: 2px solid #2563eb; outline-offset: -2px; }}
+        .toggle-icon {{ font-size: 0.85rem; color: #475569; transition: transform 0.2s ease; }}
+        .section-content {{ padding: 1.5rem 1.25rem; display: none; flex-direction: column; gap: 1.5rem; }}
+        .section-content.collapsed {{ display: none; }}
+        .section-content:not(.collapsed) {{ display: flex; }}
+        .meta-note {{ margin-bottom: 0.75rem; color: #64748b; font-size: 0.9375rem; }}
+        .group-panel {{ margin-top: 1rem; margin-bottom: 1rem; border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff; overflow: hidden; }}
+        .group-panel .section-header {{ border-radius: 0; margin: 0; }}
+        .group-panel .section-content {{ border-radius: 0; }}
         .section-title {{ color: #1d4ed8; margin-top: 3rem; margin-bottom: 1rem; font-size: 1.5rem; font-weight: 700; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem; }}
+        .action-stack {{ display: flex; gap: 0.75rem; margin-top: 1.5rem; }}
+        .actions {{ display: flex; gap: 0.5rem; justify-content: flex-end; align-items: center; }}
+        .admin-actions {{ margin: 1.5rem 0; display: flex; gap: 0.75rem; flex-wrap: wrap; }}
+
+        /* Modal styles */
+        .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(2px); animation: fadeIn 0.2s ease; }}
+        @keyframes fadeIn {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
+        .modal-content {{ background: #ffffff; margin: 5% auto; padding: 0; border-radius: 12px; max-width: 480px; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04); animation: slideUp 0.3s ease; }}
+        @keyframes slideUp {{ from {{ transform: translateY(20px); opacity: 0; }} to {{ transform: translateY(0); opacity: 1; }} }}
+        .modal-content.modal-large {{ max-width: 700px; max-height: 85vh; overflow-y: auto; }}
+        .modal-content.modal-large::-webkit-scrollbar {{ width: 8px; }}
+        .modal-content.modal-large::-webkit-scrollbar-track {{ background: #f1f5f9; }}
+        .modal-content.modal-large::-webkit-scrollbar-thumb {{ background: #cbd5e1; border-radius: 4px; }}
+        .modal-content.modal-large::-webkit-scrollbar-thumb:hover {{ background: #94a3b8; }}
+        .modal-header {{ padding: 1.5rem 2rem; border-bottom: 1px solid #e2e8f0; }}
+        .modal-header h3 {{ margin: 0; color: #0f172a; font-size: 1.25rem; font-weight: 700; }}
+        .modal form {{ padding: 2rem; }}
+        .modal-actions {{ display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #e2e8f0; }}
+
+        /* Footer */
+        .app-footer {{ margin-top: 4rem; padding: 2rem 0; text-align: center; font-size: 0.875rem; color: #94a3b8; }}
+
+        /* Responsive design */
+        @media (max-width: 768px) {{
+            main {{ padding: 1rem; }}
+            .header-bar {{ flex-direction: column; align-items: flex-start; }}
+            .dual-inputs {{ grid-template-columns: 1fr; }}
+            .usage-grid {{ grid-template-columns: 1fr; }}
+            .modal-content {{ margin: 10% 1rem; max-width: calc(100% - 2rem); }}
+            .admin {{ padding: 1rem; }}
+            th, td {{ padding: 0.75rem 0.5rem; font-size: 0.875rem; }}
+        }}
     </style>
 </head>
 <body>
@@ -421,14 +485,16 @@ pub async fn dashboard(
     <main>
         <p data-user-id=\"{auth_id}\">当前登录：<strong>{username}</strong>。</p>
         {message_block}
-        <table>
-            <thead>
-                <tr><th>用户名</th><th>额度组</th><th>角色</th><th>近 7 日使用（摘要）</th><th>操作</th></tr>
-            </thead>
-            <tbody>
-                {table_rows}
-            </tbody>
-        </table>
+        <div class=\"table-wrapper\">
+            <table>
+                <thead>
+                    <tr><th>用户名</th><th>额度组</th><th>角色</th><th>近 7 日使用（摘要）</th><th>操作</th></tr>
+                </thead>
+                <tbody>
+                    {table_rows}
+                </tbody>
+            </table>
+        </div>
         {user_controls}
         {group_sections}
         {new_group}
