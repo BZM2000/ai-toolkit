@@ -933,6 +933,117 @@ fn sanitize_redirect_path(input: Option<&str>) -> &'static str {
     }
 }
 
+const MODULE_ADMIN_SHARED_STYLES: &str = r#"
+        section.admin {
+            margin-bottom: 2rem;
+            padding: 1.5rem;
+            border-radius: 12px;
+            background: #ffffff;
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+        }
+        section.admin h2 {
+            margin-top: 0;
+            color: #1d4ed8;
+        }
+        section.admin h3 {
+            margin-top: 0;
+            color: #0f172a;
+        }
+        .section-note {
+            color: #475569;
+            font-size: 0.95rem;
+            margin-bottom: 1rem;
+        }
+        .stack {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+        .glossary-forms {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+        }
+        .glossary-forms form {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 1.25rem;
+        }
+        .glossary-forms h3 {
+            margin-bottom: 0.75rem;
+        }
+        .field {
+            margin-bottom: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+        .field label {
+            font-weight: 600;
+            color: #0f172a;
+        }
+        .field input,
+        .field select,
+        .field textarea {
+            padding: 0.75rem;
+            border-radius: 8px;
+            border: 1px solid #cbd5f5;
+            background: #f8fafc;
+            color: #0f172a;
+            font-family: inherit;
+        }
+        .field input:focus,
+        .field select:focus,
+        .field textarea:focus {
+            outline: none;
+            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+        }
+        table.glossary {
+            width: 100%;
+            border-collapse: collapse;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #ffffff;
+        }
+        table.glossary th,
+        table.glossary td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid #e2e8f0;
+            text-align: left;
+        }
+        table.glossary th {
+            background: #f1f5f9;
+            color: #0f172a;
+        }
+        table.glossary td form {
+            margin: 0;
+        }
+        button.danger {
+            background: #dc2626;
+            border: 1px solid #b91c1c;
+            color: #ffffff;
+        }
+        button.danger:hover {
+            background: #b91c1c;
+        }
+        .topic-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+        .field.compact {
+            margin-bottom: 0.75rem;
+        }
+        .field.compact label {
+            font-size: 0.9rem;
+        }
+"#;
+
 fn render_glossary_section(terms: &[GlossaryTermRow], redirect: &str) -> String {
     let mut rows = String::new();
     let mut select_options = String::new();
@@ -1298,6 +1409,7 @@ async fn summarizer_admin(
     let glossary_html = render_glossary_section(&glossary_terms, models_redirect);
     let footer = render_footer();
 
+    let shared_styles = MODULE_ADMIN_SHARED_STYLES;
     let html = format!(
         r##"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1326,13 +1438,14 @@ async fn summarizer_admin(
         .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
         .note {{ color: #475569; font-size: 0.95rem; margin-bottom: 1rem; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+{shared_styles}
     </style>
 </head>
 <body>
     <header>
         <div class="header-bar">
             <h1>摘要模块设置</h1>
-            <a class="back-link" href="/dashboard">← 返回管理后台</a>
+            <a class="back-link" href="/tools/summarizer">← 返回摘要工具</a>
         </div>
         <p>配置摘要与翻译调用的模型和提示词，术语表与 DOCX 模块共用。</p>
     </header>
@@ -1378,6 +1491,7 @@ async fn summarizer_admin(
         translation_prompt = escape_html(&prompts.translation),
         glossary_html = glossary_html,
         footer = footer,
+        shared_styles = shared_styles,
     );
 
     Ok(Html(html))
@@ -1495,6 +1609,7 @@ async fn docx_admin(
     let glossary_html = render_glossary_section(&glossary_terms, redirect_base);
     let footer = render_footer();
 
+    let shared_styles = MODULE_ADMIN_SHARED_STYLES;
     let html = format!(
         r##"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1523,13 +1638,14 @@ async fn docx_admin(
         .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
         .note {{ color: #475569; font-size: 0.95rem; margin-bottom: 1rem; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+{shared_styles}
     </style>
 </head>
 <body>
     <header>
         <div class="header-bar">
             <h1>DOCX 模块设置</h1>
-            <a class="back-link" href="/dashboard">← 返回管理后台</a>
+            <a class="back-link" href="/tools/translatedocx">← 返回 DOCX 工具</a>
         </div>
         <p>配置 DOCX 翻译调用的模型和提示词。术语表与摘要模块共用。</p>
     </header>
@@ -1569,6 +1685,7 @@ async fn docx_admin(
         cn_en_prompt = escape_html(&prompts.cn_to_en),
         glossary_html = glossary_html,
         footer = footer,
+        shared_styles = shared_styles,
     );
 
     Ok(Html(html))
@@ -1697,6 +1814,7 @@ async fn grader_admin(
     let journal_html = render_journal_section(&references, &topics, &topic_scores, redirect_base);
     let footer = render_footer();
 
+    let shared_styles = MODULE_ADMIN_SHARED_STYLES;
     let html = format!(
         r##"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1729,13 +1847,14 @@ async fn grader_admin(
         .topic-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
         .field.compact input {{ width: 100%; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+{shared_styles}
     </style>
 </head>
 <body>
     <header>
         <div class="header-bar">
             <h1>稿件评估模块设置</h1>
-            <a class="back-link" href="/dashboard">← 返回管理后台</a>
+            <a class="back-link" href="/tools/grader">← 返回评估工具</a>
         </div>
         <p>配置稿件评估与期刊匹配使用的模型、提示词、主题与期刊阈值。</p>
     </header>
@@ -1780,6 +1899,7 @@ async fn grader_admin(
         topic_html = topic_html,
         journal_html = journal_html,
         footer = footer,
+        shared_styles = shared_styles,
     );
 
     Ok(Html(html))

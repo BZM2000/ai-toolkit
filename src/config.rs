@@ -7,6 +7,34 @@ use tokio::try_join;
 const MODULE_SUMMARIZER: &str = "summarizer";
 const MODULE_TRANSLATE_DOCX: &str = "translate_docx";
 const MODULE_GRADER: &str = "grader";
+const LEGACY_GRADER_PROMPT_PREFIX: &str = "You evaluate manuscripts in the domains";
+const PROTOTYPE_GRADER_PROMPT: &str = r#"You are tasked with grading manuscripts in the areas of urban soundscape, architectural acoustics, and healthy habitat. Six prestige levels of well-known journals are listed below for reference, but you do not need to consider manuscript fit to specific journals; these are to convey the relative prestige of each level. For each manuscript, provide your educated guess—expressed as a percentage—for the chance it would be sent out for external review at each of the six journal levels. In making your estimates, consider overall quality, scope breadth, methodological novelty, interest to readership, workload, quality of writing, methodological rigour, and whether the results fully support the claims. Some manuscripts you grade may already be published articles, but please evaluate them as if they are new, without regard to where they were actually published. Note each lower level should have a equal or higher chance than the previous level.
+*Level 1 - High-impact broad journals*
+Nature Sustainability; Nature Human Behaviour; The Innovation; Science Bulletin; National Science Review; One Earth; Nature Communications; Science Advances; Proceedings of the National Academy of Sciences
+*Level 2 - Top large-field journals*
+Sustainable Cities and Society; Environment International; npj Urban Sustainability; Computers, Environment and Urban Systems; Cities; Communications Earth & Environment; Landscape and Urban Planning; Building and Environment; Journal of Environmental Psychology
+*Level 3 - Good small-field journals*
+Building Simulation; Environment and Behaviour; People and Nature; Ecological Indicators; Journal of Environmental Management; Environmental Research; Urban Forestry and Urban Greening; Urban Climate; Applied Psychology: An International Review; Frontiers of Architectural Research; Journal of Forestry Research; Journal of Building Engineering; Developments in the Built Environment; Environmental Research Letters; Environmental Health; Health & Place; Humanities & Social Sciences Communications; Applied Acoustics;
+*Level 4 - Mediocre field-specialised journals*
+Sustainability Science; Indoor Air; Journal of Exposure Science and Environmental Epidemiology; Applied Psychology: Health and Well-Being; Building Research & Information; Environment and Planning B: Urban Analytics and City Science; Journal of Leisure Research; Journal of Outdoor Recreation and Tourism; Journal of the Acoustical Society of America; Indoor and Built Environment
+*Level 5 - Low-level field-specialised journals*
+Forests; Land; Buildings; Frontiers in Psychology; Behavioural Sciences; Journal of Asian Architecture and Building Engineering; Noise & Health; Acta Acustica
+*Level 6 - Journals that explicitly say do not require novelty*
+Scientific Reports; Plos ONE; Royal Society Open Science; BMC Psychology; Heliyon; Applied Sciences; Sage Open; Sustainability; PeerJ; Environmental Research Communications
+## Output Format
+Your output must be a JSON object with:
+- Keys Level 1 through Level 6, each mapping to an integer percentage (0–100) indicating your estimate of the chance the manuscript is sent for external review at that level.
+- A single key "justification" with a one-sentence rationale for your scoring.
+Example output:
+{
+  "Level 1": 0,
+  "Level 2": 10,
+  "Level 3": 50,
+  "Level 4": 80,
+  "Level 5": 90,
+  "Level 6": 100,
+  "justification": "The methodology is solid, but the novelty and breadth do not meet the expectations for the highest-impact journals."
+}"#;
 
 #[derive(Clone, Debug, Default)]
 pub struct ModuleSettings {
@@ -51,7 +79,22 @@ impl ModuleSettings {
         .bind(&grader_prompts)
         .execute(pool);
 
-        try_join!(insert_summarizer, insert_docx, insert_grader)?;
+        let legacy_like = format!("{LEGACY_GRADER_PROMPT_PREFIX}%");
+        let update_grader_prompt = sqlx::query(
+            "UPDATE module_configs SET prompts = $1, updated_at = NOW()
+             WHERE module_name = $2 AND prompts->>'grading_instructions' LIKE $3",
+        )
+        .bind(&grader_prompts)
+        .bind(MODULE_GRADER)
+        .bind(&legacy_like)
+        .execute(pool);
+
+        try_join!(
+            insert_summarizer,
+            insert_docx,
+            insert_grader,
+            update_grader_prompt
+        )?;
 
         Ok(())
     }
@@ -258,7 +301,7 @@ fn default_grader_models() -> GraderModels {
 
 fn default_grader_prompts() -> GraderPrompts {
     GraderPrompts {
-        grading_instructions: "You evaluate manuscripts in the domains of urban soundscape, architectural acoustics, healthy habitat, and related multidisciplinary topics. Estimate the chance (in integer percentages) that the manuscript would be sent for external review at each prestige level listed below. Ensure percentages do not decrease as the prestige level decreases (Level 6 should be the largest value). Your assessment should consider methodological strength, novelty, relevance to readership, clarity of writing, workload for reviewers, and whether conclusions are supported by results.\n\nLevels of reference (higher to lower prestige):\nLevel 1 – Nature Sustainability; Nature Human Behaviour; The Innovation; Science Bulletin; National Science Review; One Earth; Nature Communications; Science Advances; Proceedings of the National Academy of Sciences\nLevel 2 – Sustainable Cities and Society; Environment International; npj Urban Sustainability; Computers, Environment and Urban Systems; Cities; Communications Earth & Environment; Landscape and Urban Planning; Building and Environment; Journal of Environmental Psychology\nLevel 3 – Building Simulation; Environment and Behavior; People and Nature; Ecological Indicators; Journal of Environmental Management; Environmental Research; Urban Forestry & Urban Greening; Urban Climate; Applied Psychology: An International Review; Frontiers of Architectural Research; Journal of Forestry Research; Journal of Building Engineering; Developments in the Built Environment; Environmental Research Letters; Environmental Health; Health & Place; Humanities & Social Sciences Communications; Applied Acoustics\nLevel 4 – Sustainability Science; Indoor Air; Journal of Exposure Science and Environmental Epidemiology; Applied Psychology: Health and Well-Being; Building Research & Information; Environment and Planning B: Urban Analytics and City Science; Journal of Leisure Research; Journal of Outdoor Recreation and Tourism; Journal of the Acoustical Society of America; Indoor and Built Environment\nLevel 5 – Forests; Land; Buildings; Frontiers in Psychology; Behavioral Sciences; Journal of Asian Architecture and Building Engineering; Noise & Health; Acta Acustica\nLevel 6 – Scientific Reports; PLOS ONE; Royal Society Open Science; BMC Psychology; Heliyon; Applied Sciences; SAGE Open; Sustainability; PeerJ; Environmental Research Communications\n\nRespond with a strict JSON object:\n{\n  \"Level 1\": <int>,\n  \"Level 2\": <int>,\n  \"Level 3\": <int>,\n  \"Level 4\": <int>,\n  \"Level 5\": <int>,\n  \"Level 6\": <int>,\n  \"justification\": \"Single sentence explanation\"\n}\nDo not include extra keys or commentary. If any value would violate the non-decreasing rule, adjust scores to satisfy it while keeping the overall distribution realistic.".to_string(),
+        grading_instructions: PROTOTYPE_GRADER_PROMPT.to_string(),
         keyword_selection: "You analyze an academic manuscript to identify its primary and secondary research focuses. Choose from the following keywords only:\n{{KEYWORDS}}\n\nOutput valid JSON with a single \"main_keyword\" (string) and up to three distinct items in \"peripheral_keywords\" (array). Peripheral keywords must differ from the main keyword. If none apply beyond the main topic, return an empty array for peripherals.".to_string(),
     }
 }
