@@ -20,6 +20,7 @@ use cookie::time::Duration as CookieDuration;
 use dotenvy::dotenv;
 use rand_core::OsRng;
 use serde::Deserialize;
+use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -1032,15 +1033,55 @@ const MODULE_ADMIN_SHARED_STYLES: &str = r#"
         }
         .topic-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
             gap: 1rem;
             margin-bottom: 1rem;
         }
-        .field.compact {
-            margin-bottom: 0.75rem;
+        .topic-picker {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            padding: 0.75rem;
+            background: #f8fafc;
+            border: 1px solid #dbeafe;
+            border-radius: 10px;
+            transition: border 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
         }
-        .field.compact label {
-            font-size: 0.9rem;
+        .topic-picker select {
+            padding: 0.6rem;
+            border-radius: 8px;
+            border: 1px solid #cbd5f5;
+            background: #ffffff;
+        }
+        .topic-picker.active {
+            border-color: #2563eb;
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+            background: #eff6ff;
+        }
+        .topic-picker.active label {
+            color: #1d4ed8;
+        }
+        .journal-form-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+        button.secondary {
+            background: #ffffff;
+            color: #1d4ed8;
+            border: 1px solid #93c5fd;
+        }
+        button.secondary:hover {
+            background: #dbeafe;
+        }
+        .action-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .action-stack form {
+            margin: 0;
         }
 "#;
 
@@ -1253,21 +1294,22 @@ fn render_journal_section(
     }
 
     let valid_ids: HashSet<Uuid> = references.iter().map(|r| r.id).collect();
-    let mut scores_map: HashMap<Uuid, Vec<(String, i16)>> = HashMap::new();
+    let mut scores_map: HashMap<Uuid, Vec<(Uuid, String, i16)>> = HashMap::new();
     for score in scores {
         if !valid_ids.contains(&score.journal_id) {
             continue;
         }
         if let Some(name) = name_lookup.get(&score.topic_id) {
-            scores_map
-                .entry(score.journal_id)
-                .or_default()
-                .push((name.clone(), score.score));
+            scores_map.entry(score.journal_id).or_default().push((
+                score.topic_id,
+                name.clone(),
+                score.score,
+            ));
         }
     }
 
     for values in scores_map.values_mut() {
-        values.sort_by(|a, b| a.0.cmp(&b.0));
+        values.sort_by(|a, b| a.1.cmp(&b.1));
     }
 
     let mut rows = String::new();
@@ -1295,20 +1337,39 @@ fn render_journal_section(
                     } else {
                         entries
                             .iter()
-                            .map(|(name, score)| format!("{}：{}", escape_html(name), score))
+                            .map(|(_, name, score)| format!("{}：{}", escape_html(name), score))
                             .collect::<Vec<_>>()
                             .join("<br>")
                     }
                 })
                 .unwrap_or_else(|| "—".to_string());
 
+            let mut score_payload = serde_json::Map::new();
+            if let Some(entries) = scores_map.get(&reference.id) {
+                for (topic_id, _name, score) in entries {
+                    score_payload.insert(topic_id.to_string(), json!(score));
+                }
+            }
+
+            let payload_value = json!({
+                "journal_name": &reference.journal_name,
+                "reference_mark": &reference.reference_mark,
+                "low_bound": reference.low_bound,
+                "notes": &reference.notes,
+                "scores": Value::Object(score_payload),
+            });
+            let payload_attr = escape_html(&payload_value.to_string());
+
             rows.push_str(&format!(
                 r#"<tr><td>{name}</td><td>{mark}</td><td>{low:.2}</td><td>{notes}</td><td>{scores}</td><td>
-    <form method="post" action="/dashboard/journal-references/delete" onsubmit="return confirm('确定删除该期刊参考？');">
-        <input type="hidden" name="id" value="{id}">
-        <input type="hidden" name="redirect" value="{redirect}">
-        <button type="submit" class="danger">删除</button>
-    </form>
+    <div class="action-stack">
+        <button type="button" class="secondary" data-load-journal="{payload}">载入表单</button>
+        <form method="post" action="/dashboard/journal-references/delete" onsubmit="return confirm('确定删除该期刊参考？');">
+            <input type="hidden" name="id" value="{id}">
+            <input type="hidden" name="redirect" value="{redirect}">
+            <button type="submit" class="danger">删除</button>
+        </form>
+    </div>
 </td></tr>"#,
                 name = escape_html(&reference.journal_name),
                 mark = mark,
@@ -1316,7 +1377,8 @@ fn render_journal_section(
                 notes = notes,
                 scores = score_display,
                 id = reference.id,
-                redirect = redirect
+                redirect = redirect,
+                payload = payload_attr
             ));
         }
     }
@@ -1327,10 +1389,19 @@ fn render_journal_section(
         let fields = topics
             .iter()
             .map(|topic| {
+                let mut options = String::new();
+                for value in 0..=3 {
+                    options.push_str(&format!(
+                        "<option value=\\\"{value}\\\"{selected}>{value}</option>",
+                        value = value,
+                        selected = if value == 0 { " selected" } else { "" },
+                    ));
+                }
                 format!(
-                    r#"<div class=\"field compact\"><label for=\"score-{id}\">{name}</label><input id=\"score-{id}\" name=\"score_{id}\" type=\"number\" min=\"0\" max=\"9\" value=\"0\"></div>"#,
+                    r#"<div class=\"topic-picker\" data-topic=\"{id}\"><label for=\"score-{id}\">{name}</label><select id=\"score-{id}\" name=\"score_{id}\" data-topic-select=\"{id}\">{options}</select></div>"#,
                     id = topic.id,
-                    name = escape_html(&topic.name)
+                    name = escape_html(&topic.name),
+                    options = options,
                 )
             })
             .collect::<String>();
@@ -1340,7 +1411,7 @@ fn render_journal_section(
         )
     };
 
-    format!(
+    let mut section_html = format!(
         r##"<section class="admin">
     <h2>期刊参考</h2>
     <p class="section-note">该列表支撑稿件评估模块的期刊推荐逻辑。</p>
@@ -1352,7 +1423,7 @@ fn render_journal_section(
             {rows}
         </tbody>
     </table>
-    <form method="post" action="/dashboard/journal-references">
+    <form id="journal-form" method="post" action="/dashboard/journal-references">
         <input type="hidden" name="redirect" value="{redirect}">
         <h3>新增或更新期刊</h3>
         <div class="field">
@@ -1372,13 +1443,99 @@ fn render_journal_section(
             <input id="journal-notes" name="notes" placeholder="简要说明">
         </div>
         {score_inputs}
-        <button type="submit">保存期刊</button>
+        <div class="journal-form-actions">
+            <button type="submit">保存期刊</button>
+            <button type="button" class="secondary" data-clear-journal-form>清空表单</button>
+        </div>
     </form>
 </section>"##,
         rows = rows,
         score_inputs = score_inputs,
         redirect = redirect,
-    )
+    );
+
+    let script = r#"
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const form = document.getElementById('journal-form');
+    if (!form) { return; }
+    const selects = Array.from(form.querySelectorAll('[data-topic-select]'));
+
+    function updateHighlight(select) {
+        const wrapper = select.closest('.topic-picker');
+        if (!wrapper) { return; }
+        const value = parseInt(select.value || '0', 10);
+        if (!Number.isNaN(value) && value > 0) {
+            wrapper.classList.add('active');
+        } else {
+            wrapper.classList.remove('active');
+        }
+    }
+
+    selects.forEach((select) => {
+        updateHighlight(select);
+        select.addEventListener('change', () => updateHighlight(select));
+    });
+
+    document.querySelectorAll('[data-load-journal]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const payloadRaw = button.getAttribute('data-load-journal');
+            if (!payloadRaw) { return; }
+
+            let data;
+            try {
+                data = JSON.parse(payloadRaw);
+            } catch (error) {
+                console.error('Failed to parse journal payload', error);
+                return;
+            }
+
+            const nameInput = form.querySelector('#journal-name');
+            const markInput = form.querySelector('#journal-mark');
+            const lowInput = form.querySelector('#journal-low');
+            const notesInput = form.querySelector('#journal-notes');
+
+            if (nameInput) { nameInput.value = data.journal_name ? String(data.journal_name) : ''; }
+            if (markInput) { markInput.value = data.reference_mark ? String(data.reference_mark) : ''; }
+            if (lowInput) {
+                if (data.low_bound === null || data.low_bound === undefined || data.low_bound === '') {
+                    lowInput.value = '';
+                } else {
+                    lowInput.value = String(data.low_bound);
+                }
+            }
+            if (notesInput) { notesInput.value = data.notes ? String(data.notes) : ''; }
+
+            const scoreMap = (data.scores && typeof data.scores === 'object') ? data.scores : {};
+            selects.forEach((select) => {
+                const topicId = select.getAttribute('data-topic-select');
+                const rawValue = topicId && Object.prototype.hasOwnProperty.call(scoreMap, topicId)
+                    ? scoreMap[topicId]
+                    : 0;
+                select.value = String(rawValue ?? 0);
+                select.dispatchEvent(new Event('change'));
+            });
+
+            if (nameInput) { nameInput.focus(); }
+        });
+    });
+
+    const resetButton = form.querySelector('[data-clear-journal-form]');
+    if (resetButton) {
+        resetButton.addEventListener('click', () => {
+            form.reset();
+            selects.forEach((select) => {
+                select.value = '0';
+                select.dispatchEvent(new Event('change'));
+            });
+        });
+    }
+});
+</script>
+"#;
+
+    section_html.push_str(script);
+    section_html
 }
 
 async fn summarizer_admin(
@@ -1844,8 +2001,15 @@ async fn grader_admin(
         table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
         th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
         th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
-        .topic-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
-        .field.compact input {{ width: 100%; }}
+        .topic-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin-bottom: 1rem; }}
+        .topic-picker {{ display: flex; flex-direction: column; gap: 0.45rem; padding: 0.75rem; background: #f8fafc; border: 1px solid #dbeafe; border-radius: 10px; transition: border 0.15s ease, box-shadow 0.15s ease, background 0.15s ease; }}
+        .topic-picker select {{ padding: 0.6rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #ffffff; }}
+        .topic-picker.active {{ border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); background: #eff6ff; }}
+        .journal-form-actions {{ display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }}
+        button.secondary {{ background: #ffffff; color: #1d4ed8; border: 1px solid #93c5fd; }}
+        button.secondary:hover {{ background: #dbeafe; }}
+        .action-stack {{ display: flex; flex-direction: column; gap: 0.5rem; }}
+        .action-stack form {{ margin: 0; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
 {shared_styles}
     </style>
