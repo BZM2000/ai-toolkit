@@ -811,11 +811,14 @@ async fn dashboard(
     let message_block = compose_flash_message(&params);
 
     let user_controls = format!(
-        r##"<section class=\"admin collapsible-section\">
-    <h2 class=\"section-header\" onclick=\"toggleSection('create-user')\">
-        <span class=\"toggle-icon\" id=\"icon-create-user\">▼</span> 创建用户
-    </h2>
-    <div class=\"section-content\" id=\"content-create-user\">
+        r##"<div class=\"admin-actions\">
+    <button class=\"btn-primary\" onclick=\"openCreateUserModal()\">+ 创建用户</button>
+</div>
+<div id=\"create-user-modal\" class=\"modal\">
+    <div class=\"modal-content\">
+        <div class=\"modal-header\">
+            <h3>创建新用户</h3>
+        </div>
         <form method=\"post\" action=\"/dashboard/users\">
             <div class=\"field\">
                 <label for=\"new-username\">用户名</label>
@@ -834,14 +837,17 @@ async fn dashboard(
             <div class=\"field checkbox\">
                 <label><input type=\"checkbox\" name=\"is_admin\" value=\"on\"> 授予管理员权限</label>
             </div>
-            <button type=\"submit\">创建用户</button>
+            <div class=\"modal-actions\">
+                <button type=\"button\" class=\"btn-sm\" onclick=\"closeCreateUserModal()\">取消</button>
+                <button type=\"submit\">创建用户</button>
+            </div>
         </form>
     </div>
-</section>"##,
+</div>"##,
         group_options = group_options_for_create,
     );
 
-    let mut group_sections = String::new();
+    let mut group_sections = String::from("<h2 class=\"section-title\">管理额度组</h2>");
     for group in &groups {
         let mut module_fields = String::new();
         for descriptor in usage::REGISTERED_MODULES {
@@ -946,11 +952,14 @@ async fn dashboard(
     }
 
     let new_group_section = format!(
-        r##"<section class=\"admin collapsible-section group-panel\">
-    <h2 class=\"section-header\" onclick=\"toggleSection('new-group')\">
-        <span class=\"toggle-icon\" id=\"icon-new-group\">▶</span> 新建额度组
-    </h2>
-    <div class=\"section-content collapsed\" id=\"content-new-group\">
+        r##"<div class=\"admin-actions\">
+    <button class=\"btn-primary\" onclick=\"openCreateGroupModal()\">+ 新建额度组</button>
+</div>
+<div id=\"create-group-modal\" class=\"modal\">
+    <div class=\"modal-content modal-large\">
+        <div class=\"modal-header\">
+            <h3>新建额度组</h3>
+        </div>
         <form method=\"post\" action=\"/dashboard/usage-groups\">
             <div class=\"field\">
                 <label for=\"new-group-name\">组名称</label>
@@ -961,12 +970,13 @@ async fn dashboard(
                 <input id=\"new-group-desc\" name=\"description\" placeholder=\"可选\">
             </div>
             {new_group_fields}
-            <div class=\"action-stack\">
+            <div class=\"modal-actions\">
+                <button type=\"button\" class=\"btn-sm\" onclick=\"closeCreateGroupModal()\">取消</button>
                 <button type=\"submit\">创建额度组</button>
             </div>
         </form>
     </div>
-</section>"##,
+</div>"##,
         new_group_fields = new_group_fields,
     );
 
@@ -1030,7 +1040,9 @@ async fn dashboard(
         .flash.success {{ background: #ecfdf3; border-color: #bbf7d0; color: #166534; }}
         .flash.error {{ background: #fef2f2; border-color: #fecaca; color: #b91c1c; }}
         .meta-note {{ margin-bottom: 0.5rem; color: #64748b; font-size: 0.95rem; }}
-        .group-panel {{ margin-top: 2.5rem; }}
+        .group-panel {{ margin-top: 1rem; margin-bottom: 1rem; border: 1px solid #e2e8f0; border-radius: 12px; background: #ffffff; }}
+        .group-panel .section-header {{ border-radius: 12px; margin: 0; }}
+        .group-panel .section-content {{ border-radius: 0 0 12px 12px; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
         .inline-form {{ margin: 0; display: inline; }}
         .inline-select {{ padding: 0.5rem 0.75rem; border-radius: 6px; border: 1px solid #cbd5e1; background: #ffffff; color: #0f172a; font-size: 0.9rem; cursor: pointer; transition: border-color 0.15s ease, box-shadow 0.15s ease; }}
@@ -1041,10 +1053,15 @@ async fn dashboard(
         .actions {{ display: flex; gap: 0.5rem; justify-content: flex-end; }}
         .modal {{ display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); }}
         .modal-content {{ background: #ffffff; margin: 10% auto; padding: 2rem; border-radius: 12px; max-width: 400px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }}
+        .modal-content.modal-large {{ max-width: 600px; max-height: 80vh; overflow-y: auto; }}
         .modal-header {{ margin-bottom: 1.5rem; }}
         .modal-header h3 {{ margin: 0; color: #0f172a; }}
         .modal-actions {{ display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; }}
         .modal-actions button {{ padding: 0.75rem 1.25rem; }}
+        .admin-actions {{ margin: 1.5rem 0; display: flex; gap: 0.75rem; flex-wrap: wrap; }}
+        .btn-primary {{ padding: 0.85rem 1.5rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; font-size: 1rem; }}
+        .btn-primary:hover {{ background: #1d4ed8; }}
+        .section-title {{ color: #1d4ed8; margin-top: 3rem; margin-bottom: 1rem; font-size: 1.5rem; font-weight: 700; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem; }}
     </style>
 </head>
 <body>
@@ -1136,11 +1153,38 @@ async fn dashboard(
             document.getElementById('password-modal').style.display = 'none';
         }}
 
+        function openCreateUserModal() {{
+            const modal = document.getElementById('create-user-modal');
+            modal.style.display = 'block';
+            document.getElementById('new-username').focus();
+        }}
+
+        function closeCreateUserModal() {{
+            document.getElementById('create-user-modal').style.display = 'none';
+        }}
+
+        function openCreateGroupModal() {{
+            const modal = document.getElementById('create-group-modal');
+            modal.style.display = 'block';
+            document.getElementById('new-group-name').focus();
+        }}
+
+        function closeCreateGroupModal() {{
+            document.getElementById('create-group-modal').style.display = 'none';
+        }}
+
         // Close modal when clicking outside
         window.onclick = function(event) {{
-            const modal = document.getElementById('password-modal');
-            if (event.target === modal) {{
+            const passwordModal = document.getElementById('password-modal');
+            const createUserModal = document.getElementById('create-user-modal');
+            const createGroupModal = document.getElementById('create-group-modal');
+
+            if (event.target === passwordModal) {{
                 closeModal();
+            }} else if (event.target === createUserModal) {{
+                closeCreateUserModal();
+            }} else if (event.target === createGroupModal) {{
+                closeCreateGroupModal();
             }}
         }}
     </script>
