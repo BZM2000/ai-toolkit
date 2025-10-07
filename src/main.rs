@@ -284,8 +284,8 @@ pub(crate) struct JournalReferenceRow {
     reference_mark: Option<String>,
     low_bound: f64,
     notes: Option<String>,
-    _created_at: chrono::DateTime<Utc>,
-    _updated_at: chrono::DateTime<Utc>,
+    created_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
