@@ -547,43 +547,60 @@ fn audio_mime_to_format(content_type: &str) -> &'static str {
 
 /// Extract assistant text and optional usage metrics from either Responses or Chat Completions payloads.
 fn extract_text_and_usage(value: &serde_json::Value) -> Option<(String, Option<TokenUsage>)> {
-    if let Ok(resp) = serde_json::from_value::<OpenRouterResponsesPayload>(value.clone()) {
-        let text = resp
-            .output
-            .into_iter()
-            .filter(|item| item.item_type == "message")
-            .flat_map(|item| item.content)
-            .find_map(|content| match content.content_type.as_str() {
-                "output_text" | "text" => Some(content.text.unwrap_or_default()),
-                _ => None,
-            })
-            .unwrap_or_default();
+    use tracing::warn;
 
-        let usage = resp.usage.map(|usage| TokenUsage {
-            prompt_tokens: usage.prompt_tokens.unwrap_or_default(),
-            response_tokens: usage.completion_tokens.unwrap_or_default(),
-            total_tokens: usage.total_tokens.unwrap_or_default(),
-        });
-
-        return Some((text, usage));
-    }
-
+    // Try OpenAI Chat Completion format first (most common)
     if let Ok(chat) = serde_json::from_value::<OpenAiChatCompletionPayload>(value.clone()) {
-        let text = chat
+        if let Some(text) = chat
             .choices
-            .into_iter()
-            .find_map(|choice| choice.message.content)
-            .unwrap_or_default();
+            .iter()
+            .find_map(|choice| {
+                if let Some(content) = &choice.message.content {
+                    if !content.is_empty() {
+                        return Some(content.clone());
+                    }
+                }
+                None
+            })
+        {
+            let usage = chat.usage.map(|usage| TokenUsage {
+                prompt_tokens: usage.prompt_tokens.unwrap_or_default(),
+                response_tokens: usage.completion_tokens.unwrap_or_default(),
+                total_tokens: usage.total_tokens.unwrap_or_default(),
+            });
 
-        let usage = chat.usage.map(|usage| TokenUsage {
-            prompt_tokens: usage.prompt_tokens.unwrap_or_default(),
-            response_tokens: usage.completion_tokens.unwrap_or_default(),
-            total_tokens: usage.total_tokens.unwrap_or_default(),
-        });
-
-        return Some((text, usage));
+            return Some((text, usage));
+        }
     }
 
+    // Try OpenRouter Responses format
+    if let Ok(resp) = serde_json::from_value::<OpenRouterResponsesPayload>(value.clone()) {
+        if let Some(text) = resp
+            .output
+            .iter()
+            .filter(|item| item.item_type == "message")
+            .flat_map(|item| &item.content)
+            .find_map(|content| {
+                // Accept any content that has text, not just specific types
+                if let Some(text) = &content.text {
+                    if !text.is_empty() {
+                        return Some(text.clone());
+                    }
+                }
+                None
+            })
+        {
+            let usage = resp.usage.map(|usage| TokenUsage {
+                prompt_tokens: usage.prompt_tokens.unwrap_or_default(),
+                response_tokens: usage.completion_tokens.unwrap_or_default(),
+                total_tokens: usage.total_tokens.unwrap_or_default(),
+            });
+
+            return Some((text, usage));
+        }
+    }
+
+    warn!("No text content found in any known format. Response structure: {:?}", value);
     None
 }
 

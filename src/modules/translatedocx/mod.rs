@@ -771,71 +771,140 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
         let mut translation_tokens_for_doc = 0_i64;
         let mut chunk_failure = false;
 
+        const MAX_RETRIES: usize = 3;
+
         for chunk in &chunks {
-            update_job_status(
-                &pool,
-                job_id,
-                Some(&format!(
-                    "Translating {} ({}) chunk {}/{}",
-                    document.original_filename,
-                    direction.display_label(),
-                    chunk.id + 1,
-                    chunks.len()
-                )),
-            )
-            .await?;
+            let mut retry_count = 0;
+            let mut chunk_success = false;
 
-            let request = build_translation_request(
-                models.translation_model.as_str(),
-                translation_prompt.clone(),
-                &chunk.source_text,
-                direction,
-            );
+            while retry_count <= MAX_RETRIES && !chunk_success {
+                let retry_info = if retry_count > 0 {
+                    format!(" (retry {}/{})", retry_count, MAX_RETRIES)
+                } else {
+                    String::new()
+                };
 
-            let response = match llm_client.execute(request).await {
-                Ok(resp) => resp,
-                Err(err) => {
-                    error!(?err, document_id = %document.id, "translation request failed");
-                    chunk_failure = true;
-                    update_document_status(
-                        &pool,
-                        document.id,
-                        STATUS_FAILED,
-                        Some("Translation request failed."),
-                        Some(&err.to_string()),
-                    )
-                    .await?;
-                    break;
-                }
-            };
-
-            translation_tokens_for_doc += response.token_usage.total_tokens as i64;
-            let translated = response.text.trim().to_string();
-            if translated.is_empty() {
-                chunk_failure = true;
-                update_document_status(
+                update_job_status(
                     &pool,
-                    document.id,
-                    STATUS_FAILED,
-                    Some("Translation response was empty."),
-                    None,
+                    job_id,
+                    Some(&format!(
+                        "Translating {} ({}) chunk {}/{}{}",
+                        document.original_filename,
+                        direction.display_label(),
+                        chunk.id + 1,
+                        chunks.len(),
+                        retry_info
+                    )),
                 )
                 .await?;
-                break;
+
+                let request = build_translation_request(
+                    models.translation_model.as_str(),
+                    translation_prompt.clone(),
+                    &chunk.source_text,
+                    direction,
+                );
+
+                let response = match llm_client.execute(request).await {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        error!(
+                            ?err,
+                            document_id = %document.id,
+                            chunk_id = chunk.id,
+                            retry_count = retry_count,
+                            "translation request failed"
+                        );
+
+                        if retry_count >= MAX_RETRIES {
+                            chunk_failure = true;
+                            update_document_status(
+                                &pool,
+                                document.id,
+                                STATUS_FAILED,
+                                Some("Translation request failed after retries."),
+                                Some(&format!("Failed after {} attempts: {}", MAX_RETRIES + 1, err)),
+                            )
+                            .await?;
+                            break;
+                        }
+
+                        retry_count += 1;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2_u64.pow(retry_count as u32))).await;
+                        continue;
+                    }
+                };
+
+                translation_tokens_for_doc += response.token_usage.total_tokens as i64;
+                let translated = response.text.trim().to_string();
+
+                if translated.is_empty() {
+                    error!(
+                        document_id = %document.id,
+                        chunk_id = chunk.id,
+                        retry_count = retry_count,
+                        raw_response = ?response.raw,
+                        "Translation response was empty"
+                    );
+
+                    if retry_count >= MAX_RETRIES {
+                        chunk_failure = true;
+                        update_document_status(
+                            &pool,
+                            document.id,
+                            STATUS_FAILED,
+                            Some("Translation response was empty after retries."),
+                            Some(&format!(
+                                "Empty response after {} attempts. Provider: {}, Model: {}",
+                                MAX_RETRIES + 1,
+                                response.provider,
+                                response.model
+                            )),
+                        )
+                        .await?;
+                        break;
+                    }
+
+                    retry_count += 1;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2_u64.pow(retry_count as u32))).await;
+                    continue;
+                }
+
+                match apply_chunk_translation(&mut translated_paragraphs, chunk, &translated) {
+                    Ok(_) => {
+                        chunk_success = true;
+                    }
+                    Err(err) => {
+                        error!(
+                            document_id = %document.id,
+                            chunk_id = chunk.id,
+                            retry_count = retry_count,
+                            expected_segments = chunk.paragraph_indices.len(),
+                            source_text = %chunk.source_text,
+                            translated_text = %translated,
+                            "Translation response did not match paragraph layout"
+                        );
+
+                        if retry_count >= MAX_RETRIES {
+                            chunk_failure = true;
+                            update_document_status(
+                                &pool,
+                                document.id,
+                                STATUS_FAILED,
+                                Some("Translation response did not match paragraph layout after retries."),
+                                Some(&format!("Failed after {} attempts: {}", MAX_RETRIES + 1, err)),
+                            )
+                            .await?;
+                            break;
+                        }
+
+                        retry_count += 1;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2_u64.pow(retry_count as u32))).await;
+                    }
+                }
             }
 
-            if let Err(err) =
-                apply_chunk_translation(&mut translated_paragraphs, chunk, &translated)
-            {
-                chunk_failure = true;
-                update_document_status(
-                    &pool,
-                    document.id,
-                    STATUS_FAILED,
-                    Some("Translation response did not match paragraph layout."),
-                    Some(&err.to_string()),
-                )
-                .await?;
+            if chunk_failure {
                 break;
             }
         }
@@ -963,14 +1032,15 @@ fn build_translation_request(
     chunk: &str,
     direction: TranslationDirection,
 ) -> LlmRequest {
+    let separator_count = chunk.matches(PARAGRAPH_SEPARATOR).count();
     let instruction = match direction {
         TranslationDirection::EnToCn => format!(
-            "Translate the following EN paragraphs into CN while preserving the separator {}:\n\n{}",
-            PARAGRAPH_SEPARATOR, chunk
+            "Translate the following EN paragraphs into CN. CRITICAL: You must preserve EXACTLY {} occurrences of the separator {} in your output. Each {} separator marks a paragraph boundary and must appear in the exact same positions in your translation.\n\nInput text:\n{}",
+            separator_count, PARAGRAPH_SEPARATOR, PARAGRAPH_SEPARATOR, chunk
         ),
         TranslationDirection::CnToEn => format!(
-            "Translate the following CN paragraphs into EN while preserving the separator {}:\n\n{}",
-            PARAGRAPH_SEPARATOR, chunk
+            "Translate the following CN paragraphs into EN. CRITICAL: You must preserve EXACTLY {} occurrences of the separator {} in your output. Each {} separator marks a paragraph boundary and must appear in the exact same positions in your translation.\n\nInput text:\n{}",
+            separator_count, PARAGRAPH_SEPARATOR, PARAGRAPH_SEPARATOR, chunk
         ),
     };
 
