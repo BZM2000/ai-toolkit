@@ -1,6 +1,5 @@
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -15,7 +14,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use sanitize_filename::sanitize;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::{fs as tokio_fs, time::sleep};
@@ -25,13 +24,11 @@ use uuid::Uuid;
 mod admin;
 
 use crate::{
-    AppState, render_footer, SESSION_COOKIE,
+    AppState, SESSION_COOKIE, escape_html,
     llm::{AttachmentKind, ChatMessage, FileAttachment, LlmClient, LlmRequest, MessageRole},
+    render_footer,
     usage::{self, MODULE_REVIEWER},
 };
-
-use quick_xml::{Reader as XmlReader, events::Event};
-use zip::ZipArchive;
 
 const STORAGE_ROOT: &str = "storage/reviewer";
 const STATUS_PENDING: &str = "pending";
@@ -47,10 +44,19 @@ pub fn router() -> Router<AppState> {
         .route("/tools/reviewer", get(reviewer_page))
         .route("/tools/reviewer/jobs", post(create_job))
         .route("/api/reviewer/jobs/:id", get(job_status))
-        .route("/api/reviewer/jobs/:job_id/round/:round/review/:idx/download", get(download_review))
+        .route(
+            "/api/reviewer/jobs/:job_id/round/:round/review/:idx/download",
+            get(download_review),
+        )
         .route("/dashboard/modules/reviewer", get(admin::settings_page))
-        .route("/dashboard/modules/reviewer/models", post(admin::save_models))
-        .route("/dashboard/modules/reviewer/prompts", post(admin::save_prompts))
+        .route(
+            "/dashboard/modules/reviewer/models",
+            post(admin::save_models),
+        )
+        .route(
+            "/dashboard/modules/reviewer/prompts",
+            post(admin::save_prompts),
+        )
 }
 
 #[derive(sqlx::FromRow, Clone)]
@@ -62,10 +68,7 @@ struct SessionUser {
 
 #[derive(sqlx::FromRow)]
 struct JobRow {
-    job_id: i32,
     user_id: Uuid,
-    filename: String,
-    language: String,
     status: String,
     status_detail: Option<String>,
 }
@@ -116,153 +119,187 @@ async fn require_user(state: &AppState, jar: &CookieJar) -> Result<SessionUser, 
     .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Session expired").into_response())
 }
 
-async fn reviewer_page(jar: CookieJar) -> Result<Html<String>, Response> {
-    let _session_id = jar
-        .get(SESSION_COOKIE)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Not authenticated").into_response())?
-        .value();
+async fn reviewer_page(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Html<String>, Response> {
+    let user = require_user(&state, &jar).await?;
+
+    let footer = render_footer();
+    let username = escape_html(&user.username);
+    let admin_link = if user.is_admin {
+        r#"<a class="admin-link" href="/dashboard/modules/reviewer">模块管理</a>"#.to_string()
+    } else {
+        String::new()
+    };
 
     let html = format!(
         r#"<!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>审稿助手 - Zhang Group AI Toolkit</title>
+    <title>审稿助手 | Zhang Group AI Toolkit</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
     <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            max-width: 900px;
-            margin: 40px auto;
-            padding: 0 20px;
-            line-height: 1.6;
-            color: #333;
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
+        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
+        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
+        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
+        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
+        .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
+        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
+        section {{ margin-bottom: 2.5rem; }}
+        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
+        .panel h2 {{ margin-top: 0; }}
+        .note {{ color: #475569; font-size: 0.95rem; }}
+        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
+        input[type="file"], select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
+        input[type="file"]:focus, select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
+        button:hover {{ background: #1d4ed8; }}
+        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
+        .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
+        .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
+        .drop-zone strong {{ color: #1d4ed8; }}
+        .drop-zone input[type="file"] {{ display: none; }}
+        .browse-link {{ color: #2563eb; text-decoration: underline; cursor: pointer; }}
+        .status-alert {{ margin-top: 1rem; font-size: 0.95rem; }}
+        .status-alert.success {{ color: #166534; }}
+        .status-alert.error {{ color: #b91c1c; }}
+        .status-card {{ margin-top: 1rem; padding: 1.25rem; border-radius: 12px; border: 1px solid #e2e8f0; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; line-height: 1.7; }}
+        .status-card.processing {{ border-color: #fbbf24; background: #fffbeb; }}
+        .status-card.completed {{ border-color: #bbf7d0; background: #ecfdf3; }}
+        .status-card.failed {{ border-color: #fecaca; background: #fef2f2; }}
+        .downloads {{ display: grid; gap: 0.5rem; margin-top: 0.75rem; }}
+        .download-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #2563eb; background: #e0f2fe; border: 1px solid #bfdbfe; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; width: fit-content; }}
+        .download-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
+        ul.process {{ padding-left: 1.25rem; margin: 0.5rem 0 0; color: #475569; }}
+        @media (max-width: 768px) {{
+            header {{ padding: 1.5rem 1rem; }}
+            main {{ padding: 1.5rem 1rem; }}
+            .header-bar {{ flex-direction: column; align-items: flex-start; }}
         }}
-        h1 {{
-            color: #2c3e50;
-            border-bottom: 3px solid #3498db;
-            padding-bottom: 10px;
-        }}
-        .description {{
-            background: #f8f9fa;
-            padding: 15px;
-            border-left: 4px solid #3498db;
-            margin: 20px 0;
-        }}
-        .form-group {{
-            margin: 20px 0;
-        }}
-        label {{
-            display: block;
-            font-weight: 600;
-            margin-bottom: 5px;
-            color: #555;
-        }}
-        input[type="file"], select {{
-            width: 100%;
-            padding: 10px;
-            border: 2px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-        }}
-        input[type="file"]:focus, select:focus {{
-            outline: none;
-            border-color: #3498db;
-        }}
-        button {{
-            background: #3498db;
-            color: white;
-            border: none;
-            padding: 12px 30px;
-            font-size: 16px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-top: 10px;
-        }}
-        button:hover {{
-            background: #2980b9;
-        }}
-        button:disabled {{
-            background: #95a5a6;
-            cursor: not-allowed;
-        }}
-        #status {{
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 4px;
-            display: none;
-        }}
-        .status-processing {{
-            background: #fff3cd;
-            border: 1px solid #ffc107;
-        }}
-        .status-completed {{
-            background: #d4edda;
-            border: 1px solid #28a745;
-        }}
-        .status-failed {{
-            background: #f8d7da;
-            border: 1px solid #dc3545;
-        }}
-        .review-link {{
-            display: inline-block;
-            margin: 5px 10px 5px 0;
-            padding: 8px 15px;
-            background: #e9ecef;
-            border-radius: 4px;
-            text-decoration: none;
-            color: #495057;
-        }}
-        .review-link:hover {{
-            background: #dee2e6;
-        }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
     </style>
 </head>
 <body>
-    <h1>审稿助手 (Academic Review Agent)</h1>
-
-    <div class="description">
-        <p><strong>功能说明：</strong>上传学术稿件（PDF或DOCX），系统将使用8个不同的LLM模型并行进行首轮审稿，然后生成元审稿报告，最后进行事实核查。所有报告均可下载为DOCX文件。</p>
-        <p><strong>工作流程：</strong></p>
-        <ul>
-            <li>第一轮：8个模型并行审稿（每个最多重试3次，至少需要4个成功）</li>
-            <li>第二轮：综合所有第一轮报告生成元审稿</li>
-            <li>第三轮：基于原稿进行事实核查</li>
-        </ul>
-    </div>
-
-    <form id="uploadForm" enctype="multipart/form-data">
-        <div class="form-group">
-            <label for="file">上传稿件（PDF或DOCX）：</label>
-            <input type="file" id="file" name="file" accept=".pdf,.docx" required>
+    <header>
+        <div class="header-bar">
+            <h1>审稿助手</h1>
+            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+                <a class="back-link" href="/">← 返回首页</a>
+                {admin_link}
+            </div>
         </div>
-
-        <div class="form-group">
-            <label for="language">审稿语言：</label>
-            <select id="language" name="language" required>
-                <option value="english">English</option>
-                <option value="chinese">中文</option>
-            </select>
-        </div>
-
-        <button type="submit" id="submitBtn">开始审稿</button>
-    </form>
-
-    <div id="status"></div>
-
+        <p class="note">当前登录：<strong>{username}</strong>。上传 PDF 或 DOCX 手稿，系统将执行三轮专家审稿流程。</p>
+    </header>
+    <main>
+        <section class="panel">
+            <h2>提交新任务</h2>
+            <p class="note">完整工作流程包含 8 个并行初审、1 次元审稿与 1 次事实核查。所有产出均可下载为 DOCX 文件。</p>
+            <ul class="process">
+                <li>第一轮：8 个模型并行独立审稿（每个最多重试 3 次，至少 4 个成功）</li>
+                <li>第二轮：综合所有第一轮结果生成元审稿</li>
+                <li>第三轮：针对原稿的事实核查与修订建议</li>
+            </ul>
+            <form id="reviewer-form" enctype="multipart/form-data">
+                <label for="file">上传稿件（PDF 或 DOCX）</label>
+                <div id="drop-area" class="drop-zone">
+                    <p><strong>拖拽文件</strong>到此处，或<span class="browse-link">点击选择</span>文件。</p>
+                    <p class="note">一次仅支持上传 1 个文件，以便执行完整审稿流程。</p>
+                    <input type="file" id="file" name="file" accept=".pdf,.docx" required>
+                </div>
+                <div id="selection-status" class="note"></div>
+                <label for="language">审稿语言</label>
+                <select id="language" name="language" required>
+                    <option value="english">English</option>
+                    <option value="chinese">中文</option>
+                </select>
+                <button type="submit" id="submit-btn">开始审稿</button>
+            </form>
+            <div id="submission-status" class="status-alert"></div>
+        </section>
+        <section class="panel">
+            <h2>任务进度</h2>
+            <div id="job-status" class="status-card">
+                <p class="note">提交任务后，这里将显示实时进度和下载链接。</p>
+            </div>
+        </section>
+        {footer}
+    </main>
     <script>
-        const form = document.getElementById('uploadForm');
-        const statusDiv = document.getElementById('status');
-        const submitBtn = document.getElementById('submitBtn');
-        let pollInterval;
+        const form = document.getElementById('reviewer-form');
+        const statusBox = document.getElementById('submission-status');
+        const jobStatus = document.getElementById('job-status');
+        const submitBtn = document.getElementById('submit-btn');
+        const dropArea = document.getElementById('drop-area');
+        const fileInput = document.getElementById('file');
+        const selectionStatus = document.getElementById('selection-status');
+        let pollTimer = null;
 
-        form.addEventListener('submit', async (e) => {{
-            e.preventDefault();
+        const statusLabels = {{
+            pending: '排队中',
+            processing: '处理中',
+            completed: '已完成',
+            failed: '失败'
+        }};
+
+        const updateSelectionStatus = () => {{
+            if (fileInput.files.length > 0) {{
+                selectionStatus.textContent = `已选择 ${{fileInput.files[0].name}}`;
+            }} else {{
+                selectionStatus.textContent = '';
+            }}
+        }};
+
+        const handleFiles = (list) => {{
+            if (!list || list.length === 0) {{
+                return;
+            }}
+            const dt = new DataTransfer();
+            dt.items.add(list[0]);
+            fileInput.files = dt.files;
+            updateSelectionStatus();
+        }};
+
+        fileInput.addEventListener('change', updateSelectionStatus);
+        dropArea.addEventListener('click', () => fileInput.click());
+        dropArea.addEventListener('dragenter', (event) => {{
+            event.preventDefault();
+            dropArea.classList.add('dragover');
+        }});
+        dropArea.addEventListener('dragover', (event) => event.preventDefault());
+        dropArea.addEventListener('dragleave', (event) => {{
+            event.preventDefault();
+            const related = event.relatedTarget;
+            if (!related || !dropArea.contains(related)) {{
+                dropArea.classList.remove('dragover');
+            }}
+        }});
+        dropArea.addEventListener('drop', (event) => {{
+            event.preventDefault();
+            dropArea.classList.remove('dragover');
+            handleFiles(event.dataTransfer.files);
+        }});
+
+        updateSelectionStatus();
+
+        form.addEventListener('submit', async (event) => {{
+            event.preventDefault();
+
+            if (!fileInput.files.length) {{
+                statusBox.textContent = '请先选择待审稿的文件。';
+                statusBox.className = 'status-alert error';
+                return;
+            }}
 
             const formData = new FormData(form);
             submitBtn.disabled = true;
-            statusDiv.style.display = 'block';
-            statusDiv.className = 'status-processing';
-            statusDiv.innerHTML = '正在提交任务...';
+            statusBox.textContent = '正在提交任务...';
+            statusBox.className = 'status-alert';
 
             try {{
                 const response = await fetch('/tools/reviewer/jobs', {{
@@ -271,85 +308,116 @@ async fn reviewer_page(jar: CookieJar) -> Result<Html<String>, Response> {
                 }});
 
                 if (!response.ok) {{
-                    const error = await response.text();
-                    throw new Error(error || 'Upload failed');
+                    const errorText = await response.text();
+                    throw new Error(errorText || '上传失败');
                 }}
 
                 const data = await response.json();
+                statusBox.textContent = '任务已提交，正在排队处理。';
+                statusBox.className = 'status-alert success';
+                setProcessingState();
                 pollJobStatus(data.job_id);
             }} catch (err) {{
-                statusDiv.className = 'status-failed';
-                statusDiv.innerHTML = `<strong>错误：</strong>${{err.message}}`;
+                statusBox.textContent = `错误：${{err.message}}`;
+                statusBox.className = 'status-alert error';
                 submitBtn.disabled = false;
             }}
         }});
 
+        function setProcessingState() {{
+            jobStatus.className = 'status-card processing';
+            jobStatus.innerHTML = '<p><strong>状态：</strong>任务已启动，正在等待各轮结果。</p>';
+        }}
+
         function pollJobStatus(jobId) {{
-            pollInterval = setInterval(async () => {{
+            if (pollTimer) {{
+                clearInterval(pollTimer);
+            }}
+
+            const fetchStatus = async () => {{
                 try {{
                     const response = await fetch(`/api/reviewer/jobs/${{jobId}}`);
+                    if (!response.ok) {{
+                        throw new Error('无法获取任务状态');
+                    }}
                     const data = await response.json();
-
-                    let html = `<strong>状态：</strong>${{data.status}}`;
-                    if (data.status_detail) {{
-                        html += `<br>${{data.status_detail}}`;
-                    }}
-
-                    if (data.round1_reviews) {{
-                        html += '<br><br><strong>第一轮审稿（8个独立评审）：</strong><br>';
-                        data.round1_reviews.forEach((r, i) => {{
-                            if (r.available && r.download_url) {{
-                                html += `<a href="${{r.download_url}}" class="review-link">下载评审 ${{i + 1}} (${{r.model}})</a>`;
-                            }}
-                        }});
-                    }}
-
-                    if (data.round2_review && data.round2_review.available) {{
-                        html += '<br><br><strong>第二轮综合审稿：</strong><br>';
-                        html += `<a href="${{data.round2_review.download_url}}" class="review-link">下载元审稿报告</a>`;
-                    }}
-
-                    if (data.round3_review && data.round3_review.available) {{
-                        html += '<br><br><strong>第三轮事实核查：</strong><br>';
-                        html += `<a href="${{data.round3_review.download_url}}" class="review-link">下载最终报告</a>`;
-                    }}
-
-                    if (data.error) {{
-                        html += `<br><br><strong>错误信息：</strong>${{data.error}}`;
-                    }}
-
-                    statusDiv.innerHTML = html;
+                    renderJobStatus(data);
 
                     if (data.status === 'completed') {{
-                        statusDiv.className = 'status-completed';
-                        clearInterval(pollInterval);
+                        statusBox.textContent = '审稿已完成，可下载各轮报告。';
+                        statusBox.className = 'status-alert success';
                         submitBtn.disabled = false;
+                        clearInterval(pollTimer);
                     }} else if (data.status === 'failed') {{
-                        statusDiv.className = 'status-failed';
-                        clearInterval(pollInterval);
+                        statusBox.textContent = data.error ? `任务失败：${{data.error}}` : '任务失败，请稍后重试。';
+                        statusBox.className = 'status-alert error';
                         submitBtn.disabled = false;
+                        clearInterval(pollTimer);
                     }}
-                }} catch (err) {{
-                    console.error('Polling error:', err);
+                }} catch (error) {{
+                    console.error('Polling error:', error);
                 }}
-            }}, 2000);
+            }};
+
+            fetchStatus();
+            pollTimer = setInterval(fetchStatus, 2000);
+        }}
+
+        function renderJobStatus(data) {{
+            const statusClass = getStatusClass(data.status);
+            jobStatus.className = `status-card ${{statusClass}}`;
+
+            let html = `<p><strong>状态：</strong>${{statusLabels[data.status] || data.status}}</p>`;
+            if (data.status_detail) {{
+                html += `<p class="note">${{data.status_detail}}</p>`;
+            }}
+
+            if (Array.isArray(data.round1_reviews)) {{
+                const available = data.round1_reviews.filter(r => r.available && r.download_url);
+                html += '<h3>第一轮审稿</h3>';
+                if (available.length) {{
+                    html += '<div class="downloads">';
+                    available.forEach((review, index) => {{
+                        html += `<a class="download-link" href="${{review.download_url}}">评审 ${{index + 1}}（${{review.model}}）</a>`;
+                    }});
+                    html += '</div>';
+                }} else {{
+                    html += '<p class="note">首轮评审正在生成中……</p>';
+                }}
+            }}
+
+            if (data.round2_review && data.round2_review.available && data.round2_review.download_url) {{
+                html += '<h3>第二轮元审稿</h3>';
+                html += `<div class="downloads"><a class="download-link" href="${{data.round2_review.download_url}}">下载元审稿报告</a></div>`;
+            }}
+
+            if (data.round3_review && data.round3_review.available && data.round3_review.download_url) {{
+                html += '<h3>第三轮事实核查</h3>';
+                html += `<div class="downloads"><a class="download-link" href="${{data.round3_review.download_url}}">下载最终报告</a></div>`;
+            }}
+
+            if (data.error && data.status !== 'completed') {{
+                html += `<p class="note" style="color:#b91c1c;">错误信息：${{data.error}}</p>`;
+            }}
+
+            jobStatus.innerHTML = html;
+        }}
+
+        function getStatusClass(status) {{
+            if (status === 'completed') return 'completed';
+            if (status === 'failed') return 'failed';
+            return 'processing';
         }}
     </script>
-
-    {footer}
 </body>
 </html>"#,
-        footer = render_footer()
+        admin_link = admin_link,
+        username = username,
+        footer = footer
     );
 
     Ok(Html(html))
 }
-
-#[derive(Deserialize)]
-struct CreateJobForm {
-    language: String,
-}
-
 async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -358,7 +426,8 @@ async fn create_job(
     let user = require_user(&state, &jar).await?;
 
     // Check usage limits
-    if let Err(e) = usage::ensure_within_limits(state.pool_ref(), user.id, MODULE_REVIEWER, 1).await {
+    if let Err(e) = usage::ensure_within_limits(state.pool_ref(), user.id, MODULE_REVIEWER, 1).await
+    {
         return Err((StatusCode::TOO_MANY_REQUESTS, e.message()).into_response());
     }
 
@@ -366,32 +435,41 @@ async fn create_job(
     let mut language = String::from("english");
     let mut file_data: Option<Vec<u8>> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
-        (StatusCode::BAD_REQUEST, format!("Multipart error: {e}")).into_response()
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Multipart error: {e}")).into_response())?
+    {
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "file" => {
-                filename = field
-                    .file_name()
-                    .unwrap_or("manuscript.pdf")
-                    .to_string();
-                file_data = Some(field.bytes().await.map_err(|e| {
-                    (StatusCode::BAD_REQUEST, format!("Failed to read file: {e}")).into_response()
-                })?.to_vec());
+                filename = field.file_name().unwrap_or("manuscript.pdf").to_string();
+                file_data = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| {
+                            (StatusCode::BAD_REQUEST, format!("Failed to read file: {e}"))
+                                .into_response()
+                        })?
+                        .to_vec(),
+                );
             }
             "language" => {
                 language = field.text().await.map_err(|e| {
-                    (StatusCode::BAD_REQUEST, format!("Failed to read language: {e}")).into_response()
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Failed to read language: {e}"),
+                    )
+                        .into_response()
                 })?;
             }
             _ => {}
         }
     }
 
-    let file_bytes = file_data.ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, "No file provided").into_response()
-    })?;
+    let file_bytes =
+        file_data.ok_or_else(|| (StatusCode::BAD_REQUEST, "No file provided").into_response())?;
 
     if !language.eq("english") && !language.eq("chinese") {
         return Err((StatusCode::BAD_REQUEST, "Invalid language").into_response());
@@ -399,13 +477,17 @@ async fn create_job(
 
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     if ext != "pdf" && ext != "docx" {
-        return Err((StatusCode::BAD_REQUEST, "Only PDF and DOCX files are accepted").into_response());
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Only PDF and DOCX files are accepted",
+        )
+            .into_response());
     }
 
     // Create job in database
     let job_id: i32 = sqlx::query_scalar(
         "INSERT INTO reviewer_jobs (user_id, filename, language, status)
-         VALUES ($1, $2, $3, $4) RETURNING job_id"
+         VALUES ($1, $2, $3, $4) RETURNING job_id",
     )
     .bind(user.id)
     .bind(&filename)
@@ -422,21 +504,31 @@ async fn create_job(
     let job_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
     tokio_fs::create_dir_all(&job_dir).await.map_err(|e| {
         error!("Failed to create job directory: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create job directory").into_response()
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create job directory",
+        )
+            .into_response()
     })?;
 
     let sanitized_filename = sanitize(&filename);
     let manuscript_path = job_dir.join(&sanitized_filename);
-    tokio_fs::write(&manuscript_path, &file_bytes).await.map_err(|e| {
-        error!("Failed to write manuscript file: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file").into_response()
-    })?;
+    tokio_fs::write(&manuscript_path, &file_bytes)
+        .await
+        .map_err(|e| {
+            error!("Failed to write manuscript file: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file").into_response()
+        })?;
 
     // Spawn background processing
     let pool = state.pool().clone();
     let llm_client = state.llm_client().clone();
     let reviewer_settings = state.reviewer_settings().await.ok_or_else(|| {
-        (StatusCode::INTERNAL_SERVER_ERROR, "Reviewer settings not configured").into_response()
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Reviewer settings not configured",
+        )
+            .into_response()
     })?;
 
     tokio::spawn(async move {
@@ -449,11 +541,13 @@ async fn create_job(
             &language,
             &ext,
             reviewer_settings,
-        ).await {
+        )
+        .await
+        {
             error!("Job {job_id} failed: {e}");
             let _ = sqlx::query(
                 "UPDATE reviewer_jobs SET status = $1, status_detail = $2, updated_at = NOW()
-                 WHERE job_id = $3"
+                 WHERE job_id = $3",
             )
             .bind(STATUS_FAILED)
             .bind(format!("Error: {e}"))
@@ -474,8 +568,8 @@ async fn job_status(
     let user = require_user(&state, &jar).await?;
 
     let job = sqlx::query_as::<_, JobRow>(
-        "SELECT job_id, user_id, filename, language, status, status_detail
-         FROM reviewer_jobs WHERE job_id = $1"
+        "SELECT user_id, status, status_detail
+         FROM reviewer_jobs WHERE job_id = $1",
     )
     .bind(job_id)
     .fetch_optional(state.pool_ref())
@@ -496,14 +590,13 @@ async fn job_status(
         round: i32,
         review_index: Option<i32>,
         model_name: String,
-        review_text: Option<String>,
         file_path: Option<String>,
         status: String,
     }
 
     let docs = sqlx::query_as::<_, DocRow>(
-        "SELECT round, review_index, model_name, review_text, file_path, status
-         FROM reviewer_documents WHERE job_id = $1 ORDER BY round, review_index"
+        "SELECT round, review_index, model_name, file_path, status
+         FROM reviewer_documents WHERE job_id = $1 ORDER BY round, review_index",
     )
     .bind(job_id)
     .fetch_all(state.pool_ref())
@@ -518,14 +611,31 @@ async fn job_status(
     let mut round3_review = None;
 
     for doc in docs {
-        match doc.round {
+        let DocRow {
+            round,
+            review_index,
+            model_name,
+            file_path,
+            status,
+        } = doc;
+
+        let is_completed = status == STATUS_COMPLETED;
+        let has_file = is_completed
+            && file_path
+                .as_ref()
+                .map(|path| !path.is_empty())
+                .unwrap_or(false);
+
+        match round {
             1 => {
-                let idx = doc.review_index.unwrap_or(0);
+                let idx = review_index.unwrap_or(0);
                 round1_reviews.push(ReviewInfo {
-                    model: doc.model_name,
-                    available: doc.status == "completed",
-                    download_url: if doc.status == "completed" {
-                        Some(format!("/api/reviewer/jobs/{job_id}/round/1/review/{idx}/download"))
+                    model: model_name,
+                    available: has_file,
+                    download_url: if has_file {
+                        Some(format!(
+                            "/api/reviewer/jobs/{job_id}/round/1/review/{idx}/download"
+                        ))
                     } else {
                         None
                     },
@@ -533,10 +643,12 @@ async fn job_status(
             }
             2 => {
                 round2_review = Some(ReviewInfo {
-                    model: doc.model_name,
-                    available: doc.status == "completed",
-                    download_url: if doc.status == "completed" {
-                        Some(format!("/api/reviewer/jobs/{job_id}/round/2/review/0/download"))
+                    model: model_name,
+                    available: has_file,
+                    download_url: if has_file {
+                        Some(format!(
+                            "/api/reviewer/jobs/{job_id}/round/2/review/0/download"
+                        ))
                     } else {
                         None
                     },
@@ -544,10 +656,12 @@ async fn job_status(
             }
             3 => {
                 round3_review = Some(ReviewInfo {
-                    model: doc.model_name,
-                    available: doc.status == "completed",
-                    download_url: if doc.status == "completed" {
-                        Some(format!("/api/reviewer/jobs/{job_id}/round/3/review/0/download"))
+                    model: model_name,
+                    available: has_file,
+                    download_url: if has_file {
+                        Some(format!(
+                            "/api/reviewer/jobs/{job_id}/round/3/review/0/download"
+                        ))
                     } else {
                         None
                     },
@@ -560,7 +674,11 @@ async fn job_status(
     Ok(Json(JobStatusResponse {
         status: job.status,
         status_detail: job.status_detail,
-        round1_reviews: if !round1_reviews.is_empty() { Some(round1_reviews) } else { None },
+        round1_reviews: if !round1_reviews.is_empty() {
+            Some(round1_reviews)
+        } else {
+            None
+        },
         round2_review,
         round3_review,
         error: None,
@@ -575,8 +693,8 @@ async fn download_review(
     let user = require_user(&state, &jar).await?;
 
     let job = sqlx::query_as::<_, JobRow>(
-        "SELECT job_id, user_id, filename, language, status, status_detail
-         FROM reviewer_jobs WHERE job_id = $1"
+        "SELECT user_id, status, status_detail
+         FROM reviewer_jobs WHERE job_id = $1",
     )
     .bind(job_id)
     .fetch_optional(state.pool_ref())
@@ -611,9 +729,9 @@ async fn download_review(
     })?
     .ok_or_else(|| (StatusCode::NOT_FOUND, "Review not found").into_response())?;
 
-    let file_path = doc.file_path.ok_or_else(|| {
-        (StatusCode::NOT_FOUND, "File not available").into_response()
-    })?;
+    let file_path = doc
+        .file_path
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "File not available").into_response())?;
 
     let path_buf = PathBuf::from(&file_path);
     let filename = path_buf
@@ -628,11 +746,18 @@ async fn download_review(
 
     Ok((
         [
-            ("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-            ("Content-Disposition", &format!("attachment; filename=\"{}\"", filename)),
+            (
+                "Content-Type",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            (
+                "Content-Disposition",
+                &format!("attachment; filename=\"{}\"", filename),
+            ),
         ],
         bytes,
-    ).into_response())
+    )
+        .into_response())
 }
 
 // Background processing function
@@ -649,7 +774,7 @@ async fn process_reviewer_job(
     // Update status to processing
     sqlx::query(
         "UPDATE reviewer_jobs SET status = $1, status_detail = $2, updated_at = NOW()
-         WHERE job_id = $3"
+         WHERE job_id = $3",
     )
     .bind(STATUS_PROCESSING)
     .bind("Starting review process...")
@@ -666,7 +791,7 @@ async fn process_reviewer_job(
 
     // Round 1: 8 parallel reviews with retry
     sqlx::query(
-        "UPDATE reviewer_jobs SET status_detail = $1, updated_at = NOW() WHERE job_id = $2"
+        "UPDATE reviewer_jobs SET status_detail = $1, updated_at = NOW() WHERE job_id = $2",
     )
     .bind("Round 1: Running 8 parallel reviews...")
     .bind(job_id)
@@ -709,7 +834,8 @@ async fn process_reviewer_job(
                 &pdf_path_clone,
                 &prompt_clone,
                 &model_clone,
-            ).await
+            )
+            .await
         }));
     }
 
@@ -736,9 +862,13 @@ async fn process_reviewer_job(
     }
 
     sqlx::query(
-        "UPDATE reviewer_jobs SET status_detail = $1, updated_at = NOW() WHERE job_id = $2"
+        "UPDATE reviewer_jobs SET status_detail = $1, updated_at = NOW() WHERE job_id = $2",
     )
-    .bind(format!("Round 1 completed: {}/{} reviews succeeded", round1_results.len(), 8))
+    .bind(format!(
+        "Round 1 completed: {}/{} reviews succeeded",
+        round1_results.len(),
+        8
+    ))
     .bind(job_id)
     .execute(&pool)
     .await?;
@@ -753,7 +883,7 @@ async fn process_reviewer_job(
 
         sqlx::query(
             "UPDATE reviewer_documents SET file_path = $1, updated_at = NOW()
-             WHERE job_id = $2 AND round = 1 AND review_index = $3"
+             WHERE job_id = $2 AND round = 1 AND review_index = $3",
         )
         .bind(docx_path.to_string_lossy().to_string())
         .bind(job_id)
@@ -764,7 +894,7 @@ async fn process_reviewer_job(
 
     // Round 2: Meta-review
     sqlx::query(
-        "UPDATE reviewer_jobs SET status_detail = $1, updated_at = NOW() WHERE job_id = $2"
+        "UPDATE reviewer_jobs SET status_detail = $1, updated_at = NOW() WHERE job_id = $2",
     )
     .bind("Round 2: Generating meta-review...")
     .bind(job_id)
@@ -777,7 +907,8 @@ async fn process_reviewer_job(
         &settings.prompts.secondary_prompt
     };
 
-    let combined_reviews = round1_results.iter()
+    let combined_reviews = round1_results
+        .iter()
         .map(|(idx, text)| format!("=== Review {} ===\n\n{}\n\n", idx + 1, text))
         .collect::<Vec<_>>()
         .join("\n");
@@ -790,7 +921,8 @@ async fn process_reviewer_job(
         round2_prompt,
         &combined_reviews,
         &settings.models.round2_model,
-    ).await?;
+    )
+    .await?;
 
     let round2_docx = PathBuf::from(STORAGE_ROOT)
         .join(job_id.to_string())
@@ -799,7 +931,7 @@ async fn process_reviewer_job(
 
     sqlx::query(
         "UPDATE reviewer_documents SET file_path = $1, updated_at = NOW()
-         WHERE job_id = $2 AND round = 2"
+         WHERE job_id = $2 AND round = 2",
     )
     .bind(round2_docx.to_string_lossy().to_string())
     .bind(job_id)
@@ -808,7 +940,7 @@ async fn process_reviewer_job(
 
     // Round 3: Fact-checking
     sqlx::query(
-        "UPDATE reviewer_jobs SET status_detail = $1, updated_at = NOW() WHERE job_id = $2"
+        "UPDATE reviewer_jobs SET status_detail = $1, updated_at = NOW() WHERE job_id = $2",
     )
     .bind("Round 3: Fact-checking...")
     .bind(job_id)
@@ -829,7 +961,8 @@ async fn process_reviewer_job(
         round3_prompt,
         &round2_text,
         &settings.models.round3_model,
-    ).await?;
+    )
+    .await?;
 
     let round3_docx = PathBuf::from(STORAGE_ROOT)
         .join(job_id.to_string())
@@ -838,7 +971,7 @@ async fn process_reviewer_job(
 
     sqlx::query(
         "UPDATE reviewer_documents SET file_path = $1, updated_at = NOW()
-         WHERE job_id = $2 AND round = 3"
+         WHERE job_id = $2 AND round = 3",
     )
     .bind(round3_docx.to_string_lossy().to_string())
     .bind(job_id)
@@ -851,7 +984,7 @@ async fn process_reviewer_job(
     // Mark job as completed
     sqlx::query(
         "UPDATE reviewer_jobs SET status = $1, status_detail = $2, updated_at = NOW()
-         WHERE job_id = $3"
+         WHERE job_id = $3",
     )
     .bind(STATUS_COMPLETED)
     .bind("All rounds completed successfully")
@@ -918,7 +1051,7 @@ async fn run_round1_review(
     // Create document record
     sqlx::query(
         "INSERT INTO reviewer_documents (job_id, round, review_index, model_name, status)
-         VALUES ($1, 1, $2, $3, $4)"
+         VALUES ($1, 1, $2, $3, $4)",
     )
     .bind(job_id)
     .bind(idx)
@@ -955,7 +1088,7 @@ async fn run_round1_review(
     let error_msg = last_error.unwrap().to_string();
     sqlx::query(
         "UPDATE reviewer_documents SET status = $1, error = $2, updated_at = NOW()
-         WHERE job_id = $3 AND round = 1 AND review_index = $4"
+         WHERE job_id = $3 AND round = 1 AND review_index = $4",
     )
     .bind(STATUS_FAILED)
     .bind(&error_msg)
@@ -964,7 +1097,9 @@ async fn run_round1_review(
     .execute(&pool)
     .await?;
 
-    Err(anyhow!("Round 1 review {idx} failed after {ROUND1_RETRIES} attempts: {error_msg}"))
+    Err(anyhow!(
+        "Round 1 review {idx} failed after {ROUND1_RETRIES} attempts: {error_msg}"
+    ))
 }
 
 async fn run_round2_review(
@@ -978,7 +1113,7 @@ async fn run_round2_review(
 ) -> Result<String> {
     sqlx::query(
         "INSERT INTO reviewer_documents (job_id, round, review_index, model_name, status)
-         VALUES ($1, 2, NULL, $2, $3)"
+         VALUES ($1, 2, NULL, $2, $3)",
     )
     .bind(job_id)
     .bind(model)
@@ -991,7 +1126,7 @@ async fn run_round2_review(
 
     sqlx::query(
         "UPDATE reviewer_documents SET review_text = $1, status = $2, updated_at = NOW()
-         WHERE job_id = $3 AND round = 2"
+         WHERE job_id = $3 AND round = 2",
     )
     .bind(&text)
     .bind(STATUS_COMPLETED)
@@ -1013,7 +1148,7 @@ async fn run_round3_review(
 ) -> Result<String> {
     sqlx::query(
         "INSERT INTO reviewer_documents (job_id, round, review_index, model_name, status)
-         VALUES ($1, 3, NULL, $2, $3)"
+         VALUES ($1, 3, NULL, $2, $3)",
     )
     .bind(job_id)
     .bind(model)
@@ -1026,7 +1161,7 @@ async fn run_round3_review(
 
     sqlx::query(
         "UPDATE reviewer_documents SET review_text = $1, status = $2, updated_at = NOW()
-         WHERE job_id = $3 AND round = 3"
+         WHERE job_id = $3 AND round = 3",
     )
     .bind(&text)
     .bind(STATUS_COMPLETED)
@@ -1059,70 +1194,6 @@ async fn call_llm(
 
     let response = llm_client.execute(request).await?;
     Ok(response.text)
-}
-
-fn extract_docx_text(path: &Path) -> Result<String> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open DOCX file {}", path.display()))?;
-    let mut archive = ZipArchive::new(file)
-        .with_context(|| format!("failed to open DOCX archive {}", path.display()))?;
-
-    let mut document = archive
-        .by_name("word/document.xml")
-        .with_context(|| format!("missing word/document.xml in {}", path.display()))?;
-
-    let mut xml = String::new();
-    document
-        .read_to_string(&mut xml)
-        .with_context(|| format!("failed to read DOCX XML for {}", path.display()))?;
-
-    let mut reader = XmlReader::from_str(&xml);
-    let mut buf = Vec::new();
-    let mut output = String::new();
-    let mut in_text_node = false;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"w:p" => {
-                    if !output.is_empty() {
-                        output.push_str("\n\n");
-                    }
-                }
-                b"w:tab" => output.push('\t'),
-                b"w:br" => output.push('\n'),
-                b"w:t" => in_text_node = true,
-                _ => {}
-            },
-            Ok(Event::Empty(ref e)) => match e.name().as_ref() {
-                b"w:p" => {
-                    if !output.is_empty() {
-                        output.push_str("\n\n");
-                    }
-                }
-                b"w:tab" => output.push('\t'),
-                b"w:br" => output.push('\n'),
-                _ => {}
-            },
-            Ok(Event::Text(e)) => {
-                if in_text_node {
-                    let value = e.unescape().map_err(|err| anyhow!(err))?.into_owned();
-                    output.push_str(&value);
-                }
-            }
-            Ok(Event::End(ref e)) => {
-                if e.name().as_ref() == b"w:t" {
-                    in_text_node = false;
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(err) => return Err(anyhow!("failed to parse DOCX XML: {}", err)),
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    Ok(output.trim().to_string())
 }
 
 async fn text_to_docx(text: &str, output_path: &Path) -> Result<()> {
