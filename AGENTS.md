@@ -115,3 +115,4 @@
 
 ## Agent Log
 - 2025-10-08 (Codex agent): Ran `cargo test` after recent usage aggregation fixes, resolved new `GlossaryTermRow` field requirements in summarizer and DOCX translator tests, and confirmed test suite now passes.
+- 2025-10-08 (Codex agent): Restored OpenRouter audio attachment payload format by adding MIME→format mapping in `src/llm/mod.rs`, verified with `cargo test`.

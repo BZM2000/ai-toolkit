@@ -1,10 +1,8 @@
 use std::{env, fmt, fs, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::{
-    Client,
-    multipart::{Form, Part},
-};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use reqwest::Client;
 use serde::Deserialize;
 
 /// Enumerates the supported LLM backends behind the shared utility.
@@ -137,15 +135,6 @@ pub enum AttachmentKind {
     Pdf,
 }
 
-impl AttachmentKind {
-    fn as_str(&self) -> &'static str {
-        match self {
-            AttachmentKind::Image => "image",
-            AttachmentKind::Audio => "audio",
-            AttachmentKind::Pdf => "pdf",
-        }
-    }
-}
 
 /// Captures basic token usage metrics associated with a call.
 #[derive(Debug, Clone, Copy, Default)]
@@ -215,71 +204,87 @@ impl LlmClient {
             bail!("OPENROUTER_API_KEY is not configured but required for OpenRouter requests");
         };
 
-        let mut input = Vec::new();
+        // Build messages in standard OpenAI format
+        let mut messages = Vec::new();
+
         for msg in &request.messages {
-            input.push(serde_json::json!({
-                "role": msg.role.as_str(),
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": msg.text,
-                    }
-                ],
-            }));
+            // For messages without attachments, use simple string content
+            if request.attachments.is_empty() {
+                messages.push(serde_json::json!({
+                    "role": msg.role.as_str(),
+                    "content": msg.text,
+                }));
+            } else {
+                // For messages with attachments, use array format
+                messages.push(serde_json::json!({
+                    "role": msg.role.as_str(),
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": msg.text,
+                        }
+                    ],
+                }));
+            }
         }
 
-        // Ensure there is a user message to hold attachment references.
-        let mut attachment_target_idx = request
-            .messages
-            .iter()
-            .rposition(|m| m.role == MessageRole::User);
+        // Add attachments to the last user message
+        if !request.attachments.is_empty() {
+            let mut attachment_target_idx = messages
+                .iter()
+                .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
 
-        if attachment_target_idx.is_none() && !request.attachments.is_empty() {
-            // create empty user entry to pin uploads
-            input.push(serde_json::json!({
-                "role": "user",
-                "content": [],
-            }));
-            attachment_target_idx = Some(input.len() - 1);
-        }
-
-        for attachment in &request.attachments {
-            if !matches!(
-                attachment.kind,
-                AttachmentKind::Image | AttachmentKind::Audio | AttachmentKind::Pdf
-            ) {
-                bail!(
-                    "unsupported attachment kind for OpenRouter: {}",
-                    attachment.kind.as_str()
-                );
+            if attachment_target_idx.is_none() {
+                // Create empty user entry to pin uploads
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": [],
+                }));
+                attachment_target_idx = Some(messages.len() - 1);
             }
 
-            let file_id = self
-                .upload_openrouter_file(api_key, attachment)
-                .await
-                .with_context(|| {
-                    format!("failed to upload {} attachment", attachment.kind.as_str())
-                })?;
-
-            if let Some(idx) = attachment_target_idx {
-                if let Some(entry) = input.get_mut(idx) {
-                    if let Some(content) = entry.get_mut("content") {
-                        if let Some(array) = content.as_array_mut() {
-                            let attachment_entry = match attachment.kind {
-                                AttachmentKind::Image => serde_json::json!({
-                                    "type": "input_image",
-                                    "image_id": file_id,
-                                }),
-                                AttachmentKind::Audio => serde_json::json!({
-                                    "type": "input_audio",
-                                    "audio_id": file_id,
-                                }),
-                                AttachmentKind::Pdf => serde_json::json!({
-                                    "type": "file_path",
-                                    "file_path": {"file_id": file_id},
-                                }),
-                            };
-                            array.push(attachment_entry);
+            for attachment in &request.attachments {
+                if let Some(idx) = attachment_target_idx {
+                    if let Some(entry) = messages.get_mut(idx) {
+                        if let Some(content) = entry.get_mut("content") {
+                            if let Some(array) = content.as_array_mut() {
+                                let base64_data = BASE64.encode(&attachment.bytes);
+                                match attachment.kind {
+                                    AttachmentKind::Image => {
+                                        let data_url = format!(
+                                            "data:{};base64,{}",
+                                            attachment.content_type, base64_data
+                                        );
+                                        array.push(serde_json::json!({
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": data_url
+                                            }
+                                        }));
+                                    }
+                                    AttachmentKind::Pdf => {
+                                        let data_url = format!(
+                                            "data:{};base64,{}",
+                                            attachment.content_type, base64_data
+                                        );
+                                        array.push(serde_json::json!({
+                                            "type": "file",
+                                            "file": data_url
+                                        }));
+                                    }
+                                    AttachmentKind::Audio => {
+                                        // Map MIME type to canonical format name expected by OpenRouter
+                                        let format = audio_mime_to_format(&attachment.content_type);
+                                        array.push(serde_json::json!({
+                                            "type": "input_audio",
+                                            "input_audio": {
+                                                "data": base64_data,
+                                                "format": format
+                                            }
+                                        }));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -297,12 +302,12 @@ impl LlmClient {
 
         let payload = serde_json::json!({
             "model": model,
-            "input": input,
+            "messages": messages,
         });
 
         let mut req_builder = self
             .http
-            .post("https://openrouter.ai/api/v1/responses")
+            .post("https://openrouter.ai/api/v1/chat/completions")
             .bearer_auth(api_key)
             .json(&payload);
 
@@ -356,24 +361,96 @@ impl LlmClient {
     }
 
     async fn execute_poe(&self, model: &str, request: LlmRequest) -> Result<LlmResponse> {
-        if !request.attachments.is_empty() {
-            bail!("attachments are not currently supported for Poe API calls");
-        }
-
         let Some(api_key) = self.config.poe_api_key.as_ref() else {
             bail!("POE_API_KEY is not configured but required for Poe requests");
         };
 
-        let messages: Vec<_> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                serde_json::json!({
+        // Check for unsupported attachment types
+        for attachment in &request.attachments {
+            if matches!(attachment.kind, AttachmentKind::Audio) {
+                bail!("Audio attachments are not supported by Poe API (audio input is ignored by Poe)");
+            }
+        }
+
+        // Build messages in standard OpenAI format
+        let mut messages = Vec::new();
+
+        for msg in &request.messages {
+            // For messages without attachments, use simple string content
+            if request.attachments.is_empty() {
+                messages.push(serde_json::json!({
                     "role": msg.role.as_str(),
                     "content": msg.text,
-                })
-            })
-            .collect();
+                }));
+            } else {
+                // For messages with attachments, use array format
+                messages.push(serde_json::json!({
+                    "role": msg.role.as_str(),
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": msg.text,
+                        }
+                    ],
+                }));
+            }
+        }
+
+        // Add attachments to the last user message
+        if !request.attachments.is_empty() {
+            let mut attachment_target_idx = messages
+                .iter()
+                .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
+
+            if attachment_target_idx.is_none() {
+                // Create empty user entry to pin uploads
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": [],
+                }));
+                attachment_target_idx = Some(messages.len() - 1);
+            }
+
+            for attachment in &request.attachments {
+                if let Some(idx) = attachment_target_idx {
+                    if let Some(entry) = messages.get_mut(idx) {
+                        if let Some(content) = entry.get_mut("content") {
+                            if let Some(array) = content.as_array_mut() {
+                                let base64_data = BASE64.encode(&attachment.bytes);
+                                match attachment.kind {
+                                    AttachmentKind::Image => {
+                                        let data_url = format!(
+                                            "data:{};base64,{}",
+                                            attachment.content_type, base64_data
+                                        );
+                                        array.push(serde_json::json!({
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": data_url
+                                            }
+                                        }));
+                                    }
+                                    AttachmentKind::Pdf => {
+                                        let data_url = format!(
+                                            "data:{};base64,{}",
+                                            attachment.content_type, base64_data
+                                        );
+                                        array.push(serde_json::json!({
+                                            "type": "file",
+                                            "file": data_url
+                                        }));
+                                    }
+                                    AttachmentKind::Audio => {
+                                        // This should never happen due to the check above
+                                        unreachable!("Audio attachments should be rejected earlier");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let payload = serde_json::json!({
             "model": model,
@@ -436,48 +513,35 @@ impl LlmClient {
         })
     }
 
-    async fn upload_openrouter_file(
-        &self,
-        api_key: &str,
-        attachment: &FileAttachment,
-    ) -> Result<String> {
-        let part = Part::bytes(attachment.bytes.clone())
-            .file_name(attachment.filename.clone())
-            .mime_str(&attachment.content_type)?;
+}
 
-        let form = Form::new().text("purpose", "assistants").part("file", part);
+/// Maps audio MIME types to canonical format names expected by OpenRouter.
+/// OpenRouter expects format values like "mp3", "wav", "ogg", etc.
+fn audio_mime_to_format(content_type: &str) -> &'static str {
+    // Normalize the content type by removing parameters (e.g., "audio/ogg; codecs=opus" -> "audio/ogg")
+    let normalized = content_type.split(';').next().unwrap_or(content_type).trim();
 
-        let response = self
-            .http
-            .post("https://openrouter.ai/api/v1/files")
-            .bearer_auth(api_key)
-            .multipart(form)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let response_text = response.text().await.context("failed to read response body")?;
-        let body: serde_json::Value = serde_json::from_str(&response_text)
-            .with_context(|| {
-                let preview = if response_text.len() > 500 {
-                    format!("{}...", &response_text[..500])
-                } else {
-                    response_text.clone()
-                };
-                format!("failed to parse OpenRouter file upload response as JSON. Response body: {}", preview)
-            })?;
-        if !status.is_success() {
-            bail!(
-                "openrouter file upload failed with status {}: {}",
-                status,
-                body
-            );
-        }
-
-        let upload: OpenRouterFileUploadResponse = serde_json::from_value(body.clone())
-            .map_err(|_| anyhow!("unable to parse file upload response: {}", body))?;
-
-        Ok(upload.id)
+    match normalized {
+        // MP3 variants
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        // WAV variants
+        "audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave" => "wav",
+        // OGG
+        "audio/ogg" => "ogg",
+        // M4A
+        "audio/m4a" | "audio/x-m4a" | "audio/mp4" => "m4a",
+        // FLAC
+        "audio/flac" | "audio/x-flac" => "flac",
+        // WebM
+        "audio/webm" => "webm",
+        // AAC
+        "audio/aac" | "audio/aacp" => "aac",
+        // MPGA (MPEG audio)
+        "audio/mpga" => "mp3",
+        // MP4 audio
+        "audio/x-mp4" => "m4a",
+        // Default fallback for unrecognized types
+        _ => "wav"
     }
 }
 
@@ -549,10 +613,6 @@ fn approximate_token_count(input: &str) -> usize {
         .count()
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenRouterFileUploadResponse {
-    id: String,
-}
 
 #[derive(Debug, Deserialize)]
 struct OpenRouterResponsesPayload {
