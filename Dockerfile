@@ -1,13 +1,16 @@
 # Multi-stage build for ai-toolkit with LibreOffice support
 
 # Stage 1: Builder
-FROM rust:nightly-slim AS builder
+FROM rust:1.82-slim-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Switch to nightly toolchain for edition 2024 support
+RUN rustup toolchain install nightly && rustup default nightly
 
 WORKDIR /app
 
