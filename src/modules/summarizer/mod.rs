@@ -2,6 +2,8 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -18,8 +20,8 @@ use pdf_extract::extract_text as extract_pdf_text;
 use quick_xml::{Reader as XmlReader, events::Event};
 use sanitize_filename::sanitize;
 use serde::Serialize;
-use tokio::{fs as tokio_fs, io::AsyncWriteExt};
-use tracing::error;
+use tokio::{fs as tokio_fs, io::AsyncWriteExt, sync::Semaphore, time::sleep};
+use tracing::{error, warn};
 use uuid::Uuid;
 use zip::ZipArchive;
 
@@ -41,6 +43,9 @@ const STATUS_COMPLETED: &str = "completed";
 const STATUS_FAILED: &str = "failed";
 
 const GLOSSARY_PLACEHOLDER: &str = "{{GLOSSARY}}";
+const MAX_RETRIES: u32 = 3;
+const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+const MAX_CONCURRENT_DOCUMENTS: usize = 5;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -117,8 +122,21 @@ async fn summarizer_page(
         .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
         .drop-zone strong {{ color: #1d4ed8; }}
         .drop-zone input[type="file"] {{ display: none; }}
-        .browse-link {{ color: #2563eb; text-decoration: underline; }}
+        .browse-link {{ color: #2563eb; text-decoration: underline; cursor: pointer; }}
+        .file-list {{ margin: 1rem 0; max-height: 300px; overflow-y: auto; }}
+        .file-item {{ display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; border: 1px solid #e2e8f0; border-radius: 6px; margin-bottom: 0.5rem; background: #ffffff; flex-wrap: wrap; gap: 0.5rem; }}
+        .file-name {{ flex: 1; min-width: 0; word-break: break-word; font-size: 0.9rem; }}
+        .file-remove {{ background: #dc2626; color: white; border: none; padding: 0.25rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem; flex-shrink: 0; }}
+        .file-remove:hover {{ background: #b91c1c; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        @media (max-width: 768px) {{
+            header {{ padding: 1.5rem 1rem; }}
+            main {{ padding: 1.5rem 1rem; }}
+            .header-bar {{ flex-direction: column; align-items: flex-start; }}
+            .drop-zone {{ padding: 1.5rem 1rem; }}
+            table {{ font-size: 0.9rem; }}
+            th, td {{ padding: 0.5rem; }}
+        }}
     </style>
 </head>
 <body>
@@ -139,9 +157,10 @@ async fn summarizer_page(
                 <label for="files">上传文件</label>
                 <div id="drop-area" class="drop-zone">
                     <p><strong>拖拽文件</strong>到此处，或<span class="browse-link">点击选择</span>文件。</p>
-                    <p class="note">每个任务最多可提交 10 个文件。</p>
+                    <p class="note">每个任务最多可提交 100 个文件。</p>
                     <input id="files" name="files" type="file" multiple accept=".pdf,.docx,.txt" required>
                 </div>
+                <div id="file-list" class="file-list"></div>
                 <label for="document-type">文档类型</label>
                 <select id="document-type" name="document_type">
                     <option value="research">科研论文</option>
@@ -164,13 +183,59 @@ async fn summarizer_page(
         const jobStatus = document.getElementById('job-status');
         const dropArea = document.getElementById('drop-area');
         const fileInput = document.getElementById('files');
+        const fileListEl = document.getElementById('file-list');
         let activeJobId = null;
         let statusTimer = null;
 
-        const updateSelectionStatus = () => {{
-            if (fileInput.files.length > 0) {{
-                statusBox.textContent = `已选择 ${{fileInput.files.length}} 个文件。`;
+        const updateFileList = () => {{
+            const files = Array.from(fileInput.files);
+
+            if (files.length === 0) {{
+                fileListEl.innerHTML = '';
+                statusBox.textContent = '';
+                return;
             }}
+
+            if (files.length > 100) {{
+                statusBox.innerHTML = '<span style="color: #dc2626;">文件数量超过限制（最多 100 个）。请移除一些文件。</span>';
+            }} else {{
+                statusBox.textContent = `已选择 ${{files.length}} 个文件。`;
+            }}
+
+            fileListEl.innerHTML = files.map((file, index) => `
+                <div class="file-item">
+                    <span class="file-name">${{escapeHtml(file.name)}}</span>
+                    <button type="button" class="file-remove" data-index="${{index}}">移除</button>
+                </div>
+            `).join('');
+
+            // Add event listeners for remove buttons
+            document.querySelectorAll('.file-remove').forEach(btn => {{
+                btn.addEventListener('click', (e) => {{
+                    const index = parseInt(e.target.dataset.index);
+                    removeFile(index);
+                }});
+            }});
+        }};
+
+        const removeFile = (index) => {{
+            const dt = new DataTransfer();
+            const files = Array.from(fileInput.files);
+
+            files.forEach((file, i) => {{
+                if (i !== index) {{
+                    dt.items.add(file);
+                }}
+            }});
+
+            fileInput.files = dt.files;
+            updateFileList();
+        }};
+
+        const escapeHtml = (str) => {{
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
         }};
 
         const handleFiles = (list) => {{
@@ -179,15 +244,17 @@ async fn summarizer_page(
             }}
 
             const dt = new DataTransfer();
-            for (const file of list) {{
-                dt.items.add(file);
-            }}
+            // Add existing files first
+            Array.from(fileInput.files).forEach(file => dt.items.add(file));
+            // Add new files
+            Array.from(list).forEach(file => dt.items.add(file));
+
             fileInput.files = dt.files;
-            updateSelectionStatus();
+            updateFileList();
         }};
 
         fileInput.addEventListener('change', () => {{
-            updateSelectionStatus();
+            updateFileList();
         }});
 
         dropArea.addEventListener('click', () => {{
@@ -219,6 +286,18 @@ async fn summarizer_page(
 
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
+
+            // Validate file count
+            if (fileInput.files.length === 0) {{
+                statusBox.innerHTML = '<span style="color: #dc2626;">请至少选择一个文件。</span>';
+                return;
+            }}
+
+            if (fileInput.files.length > 100) {{
+                statusBox.innerHTML = '<span style="color: #dc2626;">文件数量超过限制（最多 100 个）。请移除一些文件。</span>';
+                return;
+            }}
+
             statusBox.textContent = '正在上传文件...';
             const data = new FormData(form);
 
@@ -230,17 +309,20 @@ async fn summarizer_page(
 
                 if (!response.ok) {{
                     const payload = await response.json().catch(() => ({{ message: '任务提交失败。' }}));
-                    statusBox.textContent = payload.message || '任务提交失败。';
+                    statusBox.innerHTML = `<span style="color: #dc2626;">${{payload.message || '任务提交失败。'}}</span>`;
                     return;
                 }}
 
                 const payload = await response.json();
                 activeJobId = payload.job_id;
-                statusBox.textContent = '任务已入队，正在监控进度...';
+                statusBox.innerHTML = '<span style="color: #16a34a;">任务已入队，正在监控进度...</span>';
+                // Clear file list after successful submission
+                fileInput.value = '';
+                fileListEl.innerHTML = '';
                 pollStatus();
             }} catch (err) {{
                 console.error(err);
-                statusBox.textContent = '提交任务时发生异常。';
+                statusBox.innerHTML = '<span style="color: #dc2626;">提交任务时发生异常。</span>';
             }}
         }});
 
@@ -421,10 +503,10 @@ async fn create_job(
         ));
     }
 
-    if files.len() > 10 {
+    if files.len() > 100 {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ApiError::new("每个任务最多上传 10 个文件。")),
+            Json(ApiError::new("每个任务最多上传 100 个文件。")),
         ));
     }
 
@@ -906,6 +988,276 @@ fn format_heading(idx: usize, filename: &str) -> String {
     format!("Document {} — {}", idx + 1, filename)
 }
 
+async fn execute_llm_with_retry(
+    client: &crate::llm::LlmClient,
+    request: crate::llm::LlmRequest,
+    operation: &str,
+) -> Result<crate::llm::LlmResponse> {
+    let mut attempt = 0;
+    let mut last_error = None;
+
+    while attempt < MAX_RETRIES {
+        attempt += 1;
+
+        match client.execute(request.clone()).await {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                warn!(
+                    ?err,
+                    attempt,
+                    max_retries = MAX_RETRIES,
+                    operation,
+                    "LLM request failed, will retry"
+                );
+                last_error = Some(err);
+
+                if attempt < MAX_RETRIES {
+                    let delay = INITIAL_RETRY_DELAY_MS * (2_u64.pow(attempt - 1));
+                    sleep(Duration::from_millis(delay)).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("LLM request failed after {} retries", MAX_RETRIES)))
+}
+
+struct DocumentProcessingResult {
+    document_id: Uuid,
+    idx: usize,
+    original_filename: String,
+    success: bool,
+    summary_text: Option<String>,
+    translation_text: Option<String>,
+    summary_path: Option<String>,
+    translation_path: Option<String>,
+    summary_tokens: i64,
+    translation_tokens: i64,
+    error_message: Option<String>,
+    status_detail: Option<String>,
+}
+
+async fn process_single_document(
+    state: AppState,
+    job_id: Uuid,
+    job_dir: PathBuf,
+    document: ProcessingDocumentRecord,
+    idx: usize,
+    document_kind: DocumentKind,
+    models: crate::config::SummarizerModels,
+    prompts: crate::config::SummarizerPrompts,
+    translation_prompt: String,
+    should_translate: bool,
+    semaphore: Arc<Semaphore>,
+) -> DocumentProcessingResult {
+    let _permit = semaphore.acquire().await.expect("semaphore closed");
+
+    let pool = state.pool();
+    let heading = format_heading(idx, &document.original_filename);
+    let status_detail = format!("Reading {}", document.original_filename);
+
+    let _ = update_document_status(
+        &pool,
+        document.id,
+        STATUS_PROCESSING,
+        Some(&status_detail),
+        None,
+    )
+    .await;
+
+    let _ = update_job_status(&pool, job_id, Some(&status_detail)).await;
+
+    // Read document text
+    let text = match tokio::task::spawn_blocking({
+        let path = document.source_path.clone();
+        move || read_document_text(Path::new(&path))
+    })
+    .await
+    .unwrap_or_else(|err| Err(anyhow!(err)))
+    .and_then(|text| {
+        if text.is_empty() {
+            Err(anyhow!("No extractable text found"))
+        } else {
+            Ok(text)
+        }
+    }) {
+        Ok(text) => text,
+        Err(err) => {
+            error!(?err, document_id = %document.id, "failed to read input document");
+            let _ = update_document_status(
+                &pool,
+                document.id,
+                STATUS_FAILED,
+                Some("Unable to extract text from the document."),
+                Some(&err.to_string()),
+            )
+            .await;
+
+            return DocumentProcessingResult {
+                document_id: document.id,
+                idx,
+                original_filename: document.original_filename,
+                success: false,
+                summary_text: None,
+                translation_text: None,
+                summary_path: None,
+                translation_path: None,
+                summary_tokens: 0,
+                translation_tokens: 0,
+                error_message: Some(err.to_string()),
+                status_detail: Some("Unable to extract text from the document.".to_string()),
+            };
+        }
+    };
+
+    // Generate summary with retry
+    let summary_prompt = document_prompt(&prompts, document_kind);
+    let summary_request = build_summary_request(models.summary_model.as_str(), summary_prompt, &text);
+    let llm_client = state.llm_client();
+
+    let summary_response = match execute_llm_with_retry(
+        &llm_client,
+        summary_request,
+        &format!("summarization for {}", document.original_filename),
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(err) => {
+            error!(?err, document_id = %document.id, "summarization request failed after retries");
+            let _ = update_document_status(
+                &pool,
+                document.id,
+                STATUS_FAILED,
+                Some("Summarization failed."),
+                Some(&err.to_string()),
+            )
+            .await;
+
+            return DocumentProcessingResult {
+                document_id: document.id,
+                idx,
+                original_filename: document.original_filename,
+                success: false,
+                summary_text: None,
+                translation_text: None,
+                summary_path: None,
+                translation_path: None,
+                summary_tokens: 0,
+                translation_tokens: 0,
+                error_message: Some(err.to_string()),
+                status_detail: Some("Summarization failed.".to_string()),
+            };
+        }
+    };
+
+    let summary_text = summary_response.text.trim().to_string();
+    let summary_tokens = summary_response.token_usage.total_tokens as i64;
+
+    // Write summary file
+    let summary_file_path = job_dir.join(format!("summary_{}.txt", idx + 1));
+    if let Err(err) = tokio::task::spawn_blocking({
+        let path = summary_file_path.clone();
+        let content = summary_text.clone();
+        let heading = heading.clone();
+        move || create_text_file(&path, &content, &heading)
+    })
+    .await
+    .unwrap_or_else(|err| Err(anyhow!(err)))
+    {
+        error!(?err, document_id = %document.id, "failed to write summary file");
+        return DocumentProcessingResult {
+            document_id: document.id,
+            idx,
+            original_filename: document.original_filename,
+            success: false,
+            summary_text: Some(summary_text),
+            translation_text: None,
+            summary_path: None,
+            translation_path: None,
+            summary_tokens,
+            translation_tokens: 0,
+            error_message: Some(err.to_string()),
+            status_detail: Some("Failed to write summary file.".to_string()),
+        };
+    }
+
+    // Handle translation if needed
+    let mut translation_text = None;
+    let mut translation_path = None;
+    let mut translation_tokens = 0_i64;
+    let mut translation_status_detail = None;
+    let mut translation_error = None;
+
+    if should_translate {
+        let _ = update_job_status(
+            &pool,
+            job_id,
+            Some(&format!(
+                "Translating {} (glossary {})",
+                document.original_filename,
+                translation_enabled_text(should_translate)
+            )),
+        )
+        .await;
+
+        let translation_request = build_translation_request(
+            models.translation_model.as_str(),
+            translation_prompt.clone(),
+            &summary_text,
+        );
+
+        match execute_llm_with_retry(
+            &llm_client,
+            translation_request,
+            &format!("translation for {}", document.original_filename),
+        )
+        .await
+        {
+            Ok(response) => {
+                let text = response.text.trim().to_string();
+                translation_tokens = response.token_usage.total_tokens as i64;
+                let translation_file_path = job_dir.join(format!("translation_{}.txt", idx + 1));
+
+                if let Ok(_) = tokio::task::spawn_blocking({
+                    let path = translation_file_path.clone();
+                    let heading = heading.clone();
+                    let content = text.clone();
+                    move || create_text_file(&path, &content, &heading)
+                })
+                .await
+                .unwrap_or_else(|err| Err(anyhow!(err)))
+                {
+                    translation_path = Some(translation_file_path.to_string_lossy().to_string());
+                    translation_text = Some(text);
+                } else {
+                    translation_status_detail = Some("Translation file write failed; summary available.".to_string());
+                }
+            }
+            Err(err) => {
+                error!(?err, document_id = %document.id, "translation request failed after retries");
+                translation_status_detail = Some("Translation failed; summary available.".to_string());
+                translation_error = Some(err.to_string());
+            }
+        }
+    }
+
+    DocumentProcessingResult {
+        document_id: document.id,
+        idx,
+        original_filename: document.original_filename,
+        success: true,
+        summary_text: Some(summary_text),
+        translation_text,
+        summary_path: Some(summary_file_path.to_string_lossy().to_string()),
+        translation_path,
+        summary_tokens,
+        translation_tokens,
+        error_message: translation_error,
+        status_detail: translation_status_detail,
+    }
+}
+
 async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     let pool = state.pool();
     let job = sqlx::query_as::<_, ProcessingJobRecord>(
@@ -954,191 +1306,175 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     });
     let translation_prompt = build_translation_prompt(&prompts, &glossary_terms);
 
-    let llm_client = state.llm_client();
+    // Create semaphore for concurrency control
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_DOCUMENTS));
+
+    // Spawn concurrent document processing tasks
+    let mut tasks = Vec::new();
+
+    for (idx, document) in documents.into_iter().enumerate() {
+        let state_clone = state.clone();
+        let job_dir_clone = job_dir.clone();
+        let models_clone = models.clone();
+        let prompts_clone = prompts.clone();
+        let translation_prompt_clone = translation_prompt.clone();
+        let semaphore_clone = semaphore.clone();
+
+        let task = tokio::spawn(process_single_document(
+            state_clone,
+            job_id,
+            job_dir_clone,
+            document,
+            idx,
+            document_kind,
+            models_clone,
+            prompts_clone,
+            translation_prompt_clone,
+            job.translate,
+            semaphore_clone,
+        ));
+
+        tasks.push(task);
+    }
+
+    // Wait for all tasks to complete
+    let results = futures::future::join_all(tasks).await;
+
+    // Process results
     let mut combined_summary_path: Option<String> = None;
     let mut combined_translation_path: Option<String> = None;
     let mut success_count = 0_i64;
     let mut summary_tokens_total = 0_i64;
     let mut translation_tokens_total = 0_i64;
 
-    for (idx, document) in documents.iter().enumerate() {
-        let heading = format_heading(idx, &document.original_filename);
-        let status_detail = format!("Reading {}", document.original_filename);
-        update_document_status(
-            &pool,
-            document.id,
-            STATUS_PROCESSING,
-            Some(&status_detail),
-            None,
-        )
-        .await?;
-        update_job_status(&pool, job_id, Some(&status_detail)).await?;
+    // Sort results by index to maintain order
+    let mut processed_results: Vec<DocumentProcessingResult> = results
+        .into_iter()
+        .filter_map(|r| r.ok())
+        .collect();
+    processed_results.sort_by_key(|r| r.idx);
 
-        let text = match tokio::task::spawn_blocking({
-            let path = document.source_path.clone();
-            move || read_document_text(Path::new(&path))
-        })
-        .await
-        .unwrap_or_else(|err| Err(anyhow!(err)))
-        .and_then(|text| {
-            if text.is_empty() {
-                Err(anyhow!("No extractable text found"))
-            } else {
-                Ok(text)
-            }
-        }) {
-            Ok(text) => text,
-            Err(err) => {
-                error!(?err, document_id = %document.id, "failed to read input document");
-                update_document_status(
-                    &pool,
-                    document.id,
-                    STATUS_FAILED,
-                    Some("Unable to extract text from the document."),
-                    Some(&err.to_string()),
-                )
-                .await?;
-                continue;
-            }
-        };
+    for result in processed_results {
+        let heading = format_heading(result.idx, &result.original_filename);
 
-        let summary_prompt = document_prompt(&prompts, document_kind);
-        let summary_request =
-            build_summary_request(models.summary_model.as_str(), summary_prompt, &text);
-        let summary_response = match llm_client.execute(summary_request).await {
-            Ok(resp) => resp,
-            Err(err) => {
-                error!(?err, document_id = %document.id, "summarization request failed");
-                update_document_status(
-                    &pool,
-                    document.id,
-                    STATUS_FAILED,
-                    Some("Summarization failed."),
-                    Some(&err.to_string()),
-                )
-                .await?;
-                continue;
-            }
-        };
-
-        let summary_text = summary_response.text.trim().to_string();
-        summary_tokens_total += summary_response.token_usage.total_tokens as i64;
-
-        let summary_file_path = job_dir.join(format!("summary_{}.txt", idx + 1));
-        tokio::task::spawn_blocking({
-            let path = summary_file_path.clone();
-            let content = summary_text.clone();
-            let heading = heading.clone();
-            move || create_text_file(&path, &content, &heading)
-        })
-        .await
-        .unwrap_or_else(|err| Err(anyhow!(err)))
-        .context("failed to write summary file")?;
-
-        if combined_summary_path.is_none() {
-            combined_summary_path = Some(
-                combined_output_path(&job_dir, "summary")
-                    .to_string_lossy()
-                    .to_string(),
-            );
+        // Handle failed documents - persist failure information
+        if !result.success {
+            let _ = sqlx::query("UPDATE summary_documents SET status = $2, status_detail = $3, error_message = $4, updated_at = NOW() WHERE id = $1")
+                .bind(result.document_id)
+                .bind(STATUS_FAILED)
+                .bind(result.status_detail.as_deref())
+                .bind(result.error_message.as_deref())
+                .execute(&pool)
+                .await;
+            continue;
         }
-        let combined_summary_target = PathBuf::from(combined_summary_path.as_ref().unwrap());
-        tokio::task::spawn_blocking({
-            let path = combined_summary_target.clone();
-            let heading = heading.clone();
-            let content = summary_text.clone();
-            move || append_to_file(&path, &heading, &content)
-        })
-        .await
-        .unwrap_or_else(|err| Err(anyhow!(err)))
-        .context("failed to append to combined summary")?;
 
-        let mut translation_path: Option<String> = None;
-        let mut translation_text: Option<String> = None;
-        let mut translation_tokens_for_doc: i64 = 0;
-        let mut translation_status_detail: Option<String> = None;
-        let mut translation_error_detail: Option<String> = None;
+        // Append to combined summary
+        if let Some(ref summary_text) = result.summary_text {
+            if combined_summary_path.is_none() {
+                combined_summary_path = Some(
+                    combined_output_path(&job_dir, "summary")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
 
-        if job.translate {
-            update_job_status(
-                &pool,
-                job_id,
-                Some(&format!(
-                    "Translating {} (glossary {})",
-                    document.original_filename,
-                    translation_enabled_text(job.translate)
-                )),
-            )
-            .await?;
-
-            let translation_request = build_translation_request(
-                models.translation_model.as_str(),
-                translation_prompt.clone(),
-                &summary_text,
-            );
-            match llm_client.execute(translation_request).await {
-                Ok(response) => {
-                    let text = response.text.trim().to_string();
-                    translation_tokens_for_doc = response.token_usage.total_tokens as i64;
-                    translation_tokens_total += translation_tokens_for_doc;
-                    let translation_file_path =
-                        job_dir.join(format!("translation_{}.txt", idx + 1));
-                    tokio::task::spawn_blocking({
-                        let path = translation_file_path.clone();
-                        let heading = heading.clone();
-                        let content = text.clone();
-                        move || create_text_file(&path, &content, &heading)
-                    })
-                    .await
-                    .unwrap_or_else(|err| Err(anyhow!(err)))
-                    .context("failed to write translation file")?;
-
-                    if combined_translation_path.is_none() {
-                        combined_translation_path = Some(
-                            combined_output_path(&job_dir, "translation")
-                                .to_string_lossy()
-                                .to_string(),
-                        );
+            if let Some(ref combined_path) = combined_summary_path {
+                let combined_summary_target = PathBuf::from(combined_path);
+                match tokio::task::spawn_blocking({
+                    let path = combined_summary_target.clone();
+                    let heading = heading.clone();
+                    let content = summary_text.clone();
+                    move || append_to_file(&path, &heading, &content)
+                })
+                .await
+                .unwrap_or_else(|err| Err(anyhow!(err)))
+                {
+                    Ok(_) => {},
+                    Err(err) => {
+                        error!(?err, document_id = %result.document_id, "failed to append to combined summary");
+                        // Mark document as failed due to combined file write error
+                        let _ = sqlx::query("UPDATE summary_documents SET status = $2, status_detail = $3, error_message = $4, updated_at = NOW() WHERE id = $1")
+                            .bind(result.document_id)
+                            .bind(STATUS_FAILED)
+                            .bind("Failed to write combined summary file.")
+                            .bind(err.to_string())
+                            .execute(&pool)
+                            .await;
+                        continue;
                     }
-                    let combined_translation_target =
-                        PathBuf::from(combined_translation_path.as_ref().unwrap());
-                    tokio::task::spawn_blocking({
-                        let path = combined_translation_target.clone();
-                        let heading = heading.clone();
-                        let content = text.clone();
-                        move || append_to_file(&path, &heading, &content)
-                    })
-                    .await
-                    .unwrap_or_else(|err| Err(anyhow!(err)))
-                    .context("failed to append to combined translation")?;
-
-                    translation_path = Some(translation_file_path.to_string_lossy().to_string());
-                    translation_text = Some(text);
-                }
-                Err(err) => {
-                    error!(?err, document_id = %document.id, "translation request failed");
-                    translation_status_detail =
-                        Some("Translation failed; summary available.".to_string());
-                    translation_error_detail = Some(err.to_string());
                 }
             }
         }
 
-        sqlx::query("UPDATE summary_documents SET status = $2, status_detail = $3, summary_text = $4, translation_text = $5, summary_path = $6, translation_path = $7, summary_tokens = $8, translation_tokens = $9, error_message = $10, updated_at = NOW() WHERE id = $1")
-            .bind(document.id)
+        // Append to combined translation
+        if let Some(ref translation_text) = result.translation_text {
+            if combined_translation_path.is_none() {
+                combined_translation_path = Some(
+                    combined_output_path(&job_dir, "translation")
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+
+            if let Some(ref combined_path) = combined_translation_path {
+                let combined_translation_target = PathBuf::from(combined_path);
+                match tokio::task::spawn_blocking({
+                    let path = combined_translation_target.clone();
+                    let heading = heading.clone();
+                    let content = translation_text.clone();
+                    move || append_to_file(&path, &heading, &content)
+                })
+                .await
+                .unwrap_or_else(|err| Err(anyhow!(err)))
+                {
+                    Ok(_) => {},
+                    Err(err) => {
+                        error!(?err, document_id = %result.document_id, "failed to append to combined translation");
+                        // Mark document as failed due to combined file write error
+                        let _ = sqlx::query("UPDATE summary_documents SET status = $2, status_detail = $3, error_message = $4, updated_at = NOW() WHERE id = $1")
+                            .bind(result.document_id)
+                            .bind(STATUS_FAILED)
+                            .bind("Failed to write combined translation file.")
+                            .bind(err.to_string())
+                            .execute(&pool)
+                            .await;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Update database with results - propagate error on failure
+        if let Err(err) = sqlx::query("UPDATE summary_documents SET status = $2, status_detail = $3, summary_text = $4, translation_text = $5, summary_path = $6, translation_path = $7, summary_tokens = $8, translation_tokens = $9, error_message = $10, updated_at = NOW() WHERE id = $1")
+            .bind(result.document_id)
             .bind(STATUS_COMPLETED)
-            .bind(translation_status_detail.as_deref())
-            .bind(&summary_text)
-            .bind(translation_text.as_ref())
-            .bind(summary_file_path.to_string_lossy().to_string())
-            .bind(translation_path)
-            .bind(summary_response.token_usage.total_tokens as i64)
-            .bind(translation_tokens_for_doc)
-            .bind(translation_error_detail.as_deref())
+            .bind(result.status_detail.as_deref())
+            .bind(result.summary_text.as_ref())
+            .bind(result.translation_text.as_ref())
+            .bind(result.summary_path.as_ref())
+            .bind(result.translation_path.as_ref())
+            .bind(result.summary_tokens)
+            .bind(result.translation_tokens)
+            .bind(result.error_message.as_deref())
             .execute(&pool)
             .await
-            .context("failed to update document record")?;
+        {
+            error!(?err, document_id = %result.document_id, "failed to update document record in database");
+            // This is a critical failure - we can't mark the document as completed
+            // Try to mark it as failed instead
+            let _ = sqlx::query("UPDATE summary_documents SET status = $2, status_detail = $3, error_message = $4, updated_at = NOW() WHERE id = $1")
+                .bind(result.document_id)
+                .bind(STATUS_FAILED)
+                .bind("Failed to persist document results to database.")
+                .bind(err.to_string())
+                .execute(&pool)
+                .await;
+            continue;
+        }
 
+        summary_tokens_total += result.summary_tokens;
+        translation_tokens_total += result.translation_tokens;
         success_count += 1;
     }
 
