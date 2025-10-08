@@ -823,14 +823,21 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
                                 document.id,
                                 STATUS_FAILED,
                                 Some("Translation request failed after retries."),
-                                Some(&format!("Failed after {} attempts: {}", MAX_RETRIES + 1, err)),
+                                Some(&format!(
+                                    "Failed after {} attempts: {}",
+                                    MAX_RETRIES + 1,
+                                    err
+                                )),
                             )
                             .await?;
                             break;
                         }
 
                         retry_count += 1;
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2_u64.pow(retry_count as u32))).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            2_u64.pow(retry_count as u32),
+                        ))
+                        .await;
                         continue;
                     }
                 };
@@ -866,7 +873,10 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
                     }
 
                     retry_count += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2_u64.pow(retry_count as u32))).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        2_u64.pow(retry_count as u32),
+                    ))
+                    .await;
                     continue;
                 }
 
@@ -899,7 +909,10 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
                         }
 
                         retry_count += 1;
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2_u64.pow(retry_count as u32))).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            2_u64.pow(retry_count as u32),
+                        ))
+                        .await;
                     }
                 }
             }

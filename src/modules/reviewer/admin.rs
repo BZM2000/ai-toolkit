@@ -9,10 +9,7 @@ use crate::{
     AppState,
     config::{ReviewerModels, ReviewerPrompts, update_reviewer_models, update_reviewer_prompts},
     escape_html, render_footer,
-    web::{
-        admin::DashboardQuery,
-        admin_utils::compose_flash_message,
-    },
+    web::{admin::DashboardQuery, admin_utils::compose_flash_message},
 };
 
 use super::super::admin_shared::MODULE_ADMIN_SHARED_STYLES;
@@ -219,11 +216,15 @@ pub async fn save_models(
     match update_reviewer_models(state.pool_ref(), &models).await {
         Ok(_) => {
             let _ = state.reload_settings().await;
-            let redirect_path = form.redirect.unwrap_or_else(|| "/dashboard/modules/reviewer".to_string());
+            let redirect_path = form
+                .redirect
+                .unwrap_or_else(|| "/dashboard/modules/reviewer".to_string());
             Redirect::to(&format!("{}?status=models_saved", redirect_path))
         }
         Err(err) => {
-            let redirect_path = form.redirect.unwrap_or_else(|| "/dashboard/modules/reviewer".to_string());
+            let redirect_path = form
+                .redirect
+                .unwrap_or_else(|| "/dashboard/modules/reviewer".to_string());
             let error_msg = err.to_string().replace("&", "%26").replace("=", "%3D");
             Redirect::to(&format!("{}?error={}", redirect_path, error_msg))
         }
@@ -251,11 +252,15 @@ pub async fn save_prompts(
     match update_reviewer_prompts(state.pool_ref(), &prompts).await {
         Ok(_) => {
             let _ = state.reload_settings().await;
-            let redirect_path = form.redirect.unwrap_or_else(|| "/dashboard/modules/reviewer".to_string());
+            let redirect_path = form
+                .redirect
+                .unwrap_or_else(|| "/dashboard/modules/reviewer".to_string());
             Redirect::to(&format!("{}?status=prompts_saved", redirect_path))
         }
         Err(err) => {
-            let redirect_path = form.redirect.unwrap_or_else(|| "/dashboard/modules/reviewer".to_string());
+            let redirect_path = form
+                .redirect
+                .unwrap_or_else(|| "/dashboard/modules/reviewer".to_string());
             let error_msg = err.to_string().replace("&", "%26").replace("=", "%3D");
             Redirect::to(&format!("{}?error={}", redirect_path, error_msg))
         }

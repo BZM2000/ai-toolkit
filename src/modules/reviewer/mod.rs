@@ -1,7 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -28,6 +27,7 @@ use crate::{
     llm::{AttachmentKind, ChatMessage, FileAttachment, LlmClient, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_REVIEWER},
+    utils::docx_to_pdf::convert_docx_to_pdf,
 };
 
 const STORAGE_ROOT: &str = "storage/reviewer";
@@ -993,50 +993,6 @@ async fn process_reviewer_job(
     .await?;
 
     Ok(())
-}
-
-async fn convert_docx_to_pdf(docx_path: &Path) -> Result<PathBuf> {
-    let output_dir = docx_path
-        .parent()
-        .ok_or_else(|| anyhow!("Invalid path: no parent directory"))?;
-
-    let output = Command::new("libreoffice")
-        .args(&[
-            "--headless",
-            "--convert-to",
-            "pdf:writer_pdf_Export",
-            "--outdir",
-            &output_dir.to_string_lossy(),
-            &docx_path.to_string_lossy(),
-        ])
-        .output()
-        .context("Failed to execute libreoffice command")?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "LibreOffice conversion failed with exit code {:?}\nStderr: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let pdf_filename = docx_path
-        .file_stem()
-        .ok_or_else(|| anyhow!("Invalid DOCX filename"))?
-        .to_string_lossy()
-        .to_string()
-        + ".pdf";
-
-    let pdf_path = output_dir.join(pdf_filename);
-
-    if !pdf_path.exists() {
-        return Err(anyhow!(
-            "PDF file was not created at expected path: {}",
-            pdf_path.display()
-        ));
-    }
-
-    Ok(pdf_path)
 }
 
 async fn run_round1_review(

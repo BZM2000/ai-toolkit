@@ -7,7 +7,10 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    config::{DocxTranslatorSettings, GraderSettings, ModuleSettings, ReviewerSettings, SummarizerSettings},
+    config::{
+        DocxTranslatorSettings, GraderSettings, ModuleSettings, ReviewerSettings,
+        SummarizerSettings,
+    },
     llm::LlmClient,
 };
 

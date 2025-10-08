@@ -135,7 +135,6 @@ pub enum AttachmentKind {
     Pdf,
 }
 
-
 /// Captures basic token usage metrics associated with a call.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TokenUsage {
@@ -321,16 +320,21 @@ impl LlmClient {
 
         let response = req_builder.send().await?;
         let status = response.status();
-        let response_text = response.text().await.context("failed to read response body")?;
-        let body: serde_json::Value = serde_json::from_str(&response_text)
-            .with_context(|| {
-                let preview = if response_text.len() > 500 {
-                    format!("{}...", &response_text[..500])
-                } else {
-                    response_text.clone()
-                };
-                format!("failed to parse OpenRouter response as JSON. Response body: {}", preview)
-            })?;
+        let response_text = response
+            .text()
+            .await
+            .context("failed to read response body")?;
+        let body: serde_json::Value = serde_json::from_str(&response_text).with_context(|| {
+            let preview = if response_text.len() > 500 {
+                format!("{}...", &response_text[..500])
+            } else {
+                response_text.clone()
+            };
+            format!(
+                "failed to parse OpenRouter response as JSON. Response body: {}",
+                preview
+            )
+        })?;
         if !status.is_success() {
             bail!("openrouter call failed with status {}: {}", status, body);
         }
@@ -368,7 +372,9 @@ impl LlmClient {
         // Check for unsupported attachment types
         for attachment in &request.attachments {
             if matches!(attachment.kind, AttachmentKind::Audio) {
-                bail!("Audio attachments are not supported by Poe API (audio input is ignored by Poe)");
+                bail!(
+                    "Audio attachments are not supported by Poe API (audio input is ignored by Poe)"
+                );
             }
         }
 
@@ -442,7 +448,9 @@ impl LlmClient {
                                     }
                                     AttachmentKind::Audio => {
                                         // This should never happen due to the check above
-                                        unreachable!("Audio attachments should be rejected earlier");
+                                        unreachable!(
+                                            "Audio attachments should be rejected earlier"
+                                        );
                                     }
                                 }
                             }
@@ -466,16 +474,21 @@ impl LlmClient {
             .await?;
 
         let status = response.status();
-        let response_text = response.text().await.context("failed to read response body")?;
-        let body: serde_json::Value = serde_json::from_str(&response_text)
-            .with_context(|| {
-                let preview = if response_text.len() > 500 {
-                    format!("{}...", &response_text[..500])
-                } else {
-                    response_text.clone()
-                };
-                format!("failed to parse Poe response as JSON. Response body: {}", preview)
-            })?;
+        let response_text = response
+            .text()
+            .await
+            .context("failed to read response body")?;
+        let body: serde_json::Value = serde_json::from_str(&response_text).with_context(|| {
+            let preview = if response_text.len() > 500 {
+                format!("{}...", &response_text[..500])
+            } else {
+                response_text.clone()
+            };
+            format!(
+                "failed to parse Poe response as JSON. Response body: {}",
+                preview
+            )
+        })?;
         if !status.is_success() {
             bail!("poe call failed with status {}: {}", status, body);
         }
@@ -512,14 +525,17 @@ impl LlmClient {
             raw: body,
         })
     }
-
 }
 
 /// Maps audio MIME types to canonical format names expected by OpenRouter.
 /// OpenRouter expects format values like "mp3", "wav", "ogg", etc.
 fn audio_mime_to_format(content_type: &str) -> &'static str {
     // Normalize the content type by removing parameters (e.g., "audio/ogg; codecs=opus" -> "audio/ogg")
-    let normalized = content_type.split(';').next().unwrap_or(content_type).trim();
+    let normalized = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim();
 
     match normalized {
         // MP3 variants
@@ -541,7 +557,7 @@ fn audio_mime_to_format(content_type: &str) -> &'static str {
         // MP4 audio
         "audio/x-mp4" => "m4a",
         // Default fallback for unrecognized types
-        _ => "wav"
+        _ => "wav",
     }
 }
 
@@ -551,18 +567,14 @@ fn extract_text_and_usage(value: &serde_json::Value) -> Option<(String, Option<T
 
     // Try OpenAI Chat Completion format first (most common)
     if let Ok(chat) = serde_json::from_value::<OpenAiChatCompletionPayload>(value.clone()) {
-        if let Some(text) = chat
-            .choices
-            .iter()
-            .find_map(|choice| {
-                if let Some(content) = &choice.message.content {
-                    if !content.is_empty() {
-                        return Some(content.clone());
-                    }
+        if let Some(text) = chat.choices.iter().find_map(|choice| {
+            if let Some(content) = &choice.message.content {
+                if !content.is_empty() {
+                    return Some(content.clone());
                 }
-                None
-            })
-        {
+            }
+            None
+        }) {
             let usage = chat.usage.map(|usage| TokenUsage {
                 prompt_tokens: usage.prompt_tokens.unwrap_or_default(),
                 response_tokens: usage.completion_tokens.unwrap_or_default(),
@@ -600,7 +612,10 @@ fn extract_text_and_usage(value: &serde_json::Value) -> Option<(String, Option<T
         }
     }
 
-    warn!("No text content found in any known format. Response structure: {:?}", value);
+    warn!(
+        "No text content found in any known format. Response structure: {:?}",
+        value
+    );
     None
 }
 
@@ -630,7 +645,6 @@ fn approximate_token_count(input: &str) -> usize {
         .count()
 }
 
-
 #[derive(Debug, Deserialize)]
 struct OpenRouterResponsesPayload {
     #[serde(default)]
@@ -650,7 +664,7 @@ struct OpenRouterOutputItem {
 #[derive(Debug, Deserialize)]
 struct OpenRouterOutputContent {
     #[serde(rename = "type")]
-    content_type: String,
+    _content_type: String,
     #[serde(default)]
     text: Option<String>,
 }

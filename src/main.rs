@@ -2,6 +2,7 @@ mod config;
 pub mod llm;
 mod modules;
 mod usage;
+mod utils;
 mod web;
 
 pub use web::{

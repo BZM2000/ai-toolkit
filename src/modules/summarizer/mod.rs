@@ -1112,7 +1112,8 @@ async fn process_single_document(
 
     // Generate summary with retry
     let summary_prompt = document_prompt(&prompts, document_kind);
-    let summary_request = build_summary_request(models.summary_model.as_str(), summary_prompt, &text);
+    let summary_request =
+        build_summary_request(models.summary_model.as_str(), summary_prompt, &text);
     let llm_client = state.llm_client();
 
     let summary_response = match execute_llm_with_retry(
@@ -1231,12 +1232,14 @@ async fn process_single_document(
                     translation_path = Some(translation_file_path.to_string_lossy().to_string());
                     translation_text = Some(text);
                 } else {
-                    translation_status_detail = Some("Translation file write failed; summary available.".to_string());
+                    translation_status_detail =
+                        Some("Translation file write failed; summary available.".to_string());
                 }
             }
             Err(err) => {
                 error!(?err, document_id = %document.id, "translation request failed after retries");
-                translation_status_detail = Some("Translation failed; summary available.".to_string());
+                translation_status_detail =
+                    Some("Translation failed; summary available.".to_string());
                 translation_error = Some(err.to_string());
             }
         }
@@ -1348,10 +1351,8 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
     let mut translation_tokens_total = 0_i64;
 
     // Sort results by index to maintain order
-    let mut processed_results: Vec<DocumentProcessingResult> = results
-        .into_iter()
-        .filter_map(|r| r.ok())
-        .collect();
+    let mut processed_results: Vec<DocumentProcessingResult> =
+        results.into_iter().filter_map(|r| r.ok()).collect();
     processed_results.sort_by_key(|r| r.idx);
 
     for result in processed_results {
@@ -1390,7 +1391,7 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
                 .await
                 .unwrap_or_else(|err| Err(anyhow!(err)))
                 {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(err) => {
                         error!(?err, document_id = %result.document_id, "failed to append to combined summary");
                         // Mark document as failed due to combined file write error
@@ -1428,7 +1429,7 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
                 .await
                 .unwrap_or_else(|err| Err(anyhow!(err)))
                 {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(err) => {
                         error!(?err, document_id = %result.document_id, "failed to append to combined translation");
                         // Mark document as failed due to combined file write error
