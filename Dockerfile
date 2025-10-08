@@ -1,7 +1,7 @@
 # Multi-stage build for ai-toolkit with LibreOffice support
 
 # Stage 1: Builder
-FROM rust:nightly-slim-bookworm AS builder
+FROM rust:nightly-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
