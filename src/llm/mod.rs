@@ -316,7 +316,16 @@ impl LlmClient {
 
         let response = req_builder.send().await?;
         let status = response.status();
-        let body: serde_json::Value = response.json().await?;
+        let response_text = response.text().await.context("failed to read response body")?;
+        let body: serde_json::Value = serde_json::from_str(&response_text)
+            .with_context(|| {
+                let preview = if response_text.len() > 500 {
+                    format!("{}...", &response_text[..500])
+                } else {
+                    response_text.clone()
+                };
+                format!("failed to parse OpenRouter response as JSON. Response body: {}", preview)
+            })?;
         if !status.is_success() {
             bail!("openrouter call failed with status {}: {}", status, body);
         }
@@ -380,7 +389,16 @@ impl LlmClient {
             .await?;
 
         let status = response.status();
-        let body: serde_json::Value = response.json().await?;
+        let response_text = response.text().await.context("failed to read response body")?;
+        let body: serde_json::Value = serde_json::from_str(&response_text)
+            .with_context(|| {
+                let preview = if response_text.len() > 500 {
+                    format!("{}...", &response_text[..500])
+                } else {
+                    response_text.clone()
+                };
+                format!("failed to parse Poe response as JSON. Response body: {}", preview)
+            })?;
         if !status.is_success() {
             bail!("poe call failed with status {}: {}", status, body);
         }
@@ -438,7 +456,16 @@ impl LlmClient {
             .await?;
 
         let status = response.status();
-        let body: serde_json::Value = response.json().await?;
+        let response_text = response.text().await.context("failed to read response body")?;
+        let body: serde_json::Value = serde_json::from_str(&response_text)
+            .with_context(|| {
+                let preview = if response_text.len() > 500 {
+                    format!("{}...", &response_text[..500])
+                } else {
+                    response_text.clone()
+                };
+                format!("failed to parse OpenRouter file upload response as JSON. Response body: {}", preview)
+            })?;
         if !status.is_success() {
             bail!(
                 "openrouter file upload failed with status {}: {}",

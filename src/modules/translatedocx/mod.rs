@@ -1402,6 +1402,7 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
 
     #[test]
     fn glossary_prompt_includes_terms() {
@@ -1411,11 +1412,14 @@ mod tests {
             cn_to_en: "Use glossary:\n{{GLOSSARY}}\nKeep marker {{PARAGRAPH_SEPARATOR}}"
                 .to_string(),
         };
+        let now = Utc::now();
         let terms = vec![GlossaryTermRow {
             id: Uuid::new_v4(),
             source_term: "neuron".to_string(),
             target_term: "神经元".to_string(),
             notes: None,
+            created_at: now,
+            updated_at: now,
         }];
 
         let prompt_en = build_translation_prompt(&prompts, &terms, TranslationDirection::EnToCn);

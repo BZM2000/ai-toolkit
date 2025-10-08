@@ -112,3 +112,6 @@
 ## Testing & Verification
 - Unit tests (`cargo test`) cover translation prompt assembly and DOCX text extraction helpers.
 - For manual end-to-end checks: run `cargo run`, log in as an admin, add glossary entries, submit a summarizer job, watch `/api/summarizer/jobs/{id}` poll results, and verify downloads.
+
+## Agent Log
+- 2025-10-08 (Codex agent): Ran `cargo test` after recent usage aggregation fixes, resolved new `GlossaryTermRow` field requirements in summarizer and DOCX translator tests, and confirmed test suite now passes.

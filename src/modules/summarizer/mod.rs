@@ -1404,17 +1404,21 @@ fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use std::io::Write;
     use tempfile::tempdir;
     use zip::write::SimpleFileOptions;
 
     #[test]
     fn generates_translation_prompt_with_terms() {
+        let now = Utc::now();
         let terms = vec![GlossaryTermRow {
             id: Uuid::new_v4(),
             source_term: "neuron".to_string(),
             target_term: "神经元".to_string(),
             notes: None,
+            created_at: now,
+            updated_at: now,
         }];
 
         let prompts = SummarizerPrompts {
