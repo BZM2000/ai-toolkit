@@ -34,7 +34,7 @@ pub fn compose_flash_message(status: Option<&str>, error: Option<&str>) -> Strin
         };
 
         if !message.is_empty() {
-            return format!("<div class=\"flash success\">{message}</div>");
+            return format!(r#"<div class="flash success">{message}</div>"#);
         }
     }
 
@@ -70,7 +70,7 @@ pub fn compose_flash_message(status: Option<&str>, error: Option<&str>) -> Strin
             _ => "发生未知错误，请查看日志。",
         };
 
-        return format!("<div class=\"flash error\">{message}</div>");
+        return format!(r#"<div class="flash error">{message}</div>"#);
     }
 
     String::new()

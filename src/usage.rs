@@ -172,7 +172,8 @@ pub async fn load_snapshot(
     let window_start = Utc::now() - WINDOW_DURATION;
 
     let aggregates_row = sqlx::query(
-        "SELECT COALESCE(SUM(tokens), 0) AS tokens, COALESCE(SUM(units), 0) AS units \
+        "SELECT COALESCE(SUM(tokens)::BIGINT, 0::BIGINT) AS tokens, \
+                COALESCE(SUM(units)::BIGINT, 0::BIGINT) AS units \
          FROM usage_events \
          WHERE user_id = $1 AND module_key = $2 AND occurred_at >= $3",
     )
@@ -205,7 +206,9 @@ pub async fn usage_for_users(
     let window_start = Utc::now() - WINDOW_DURATION;
 
     let rows = sqlx::query(
-        "SELECT user_id, module_key, COALESCE(SUM(tokens), 0) AS tokens, COALESCE(SUM(units), 0) AS units \
+        "SELECT user_id, module_key, \
+                COALESCE(SUM(tokens)::BIGINT, 0::BIGINT) AS tokens, \
+                COALESCE(SUM(units)::BIGINT, 0::BIGINT) AS units \
          FROM usage_events \
          WHERE user_id = ANY($1) AND occurred_at >= $2 \
          GROUP BY user_id, module_key",

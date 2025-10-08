@@ -224,7 +224,7 @@ pub async fn grader_page(
     let user = require_user(&state, &jar).await?;
     let footer = render_footer();
     let admin_link = if user.is_admin {
-        "<a class=\"admin-link\" href=\"/dashboard/modules/grader\">模块管理</a>"
+        r#"<a class="admin-link" href="/dashboard/modules/grader">模块管理</a>"#
     } else {
         ""
     };

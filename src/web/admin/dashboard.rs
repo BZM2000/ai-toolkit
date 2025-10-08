@@ -55,14 +55,14 @@ pub async fn dashboard(
     for (idx, group) in groups.iter().enumerate() {
         group_lookup.insert(group.id, group.limits.clone());
         let option = format!(
-            "<option value=\"{value}\"{selected}>{label}</option>",
+            r#"<option value="{value}"{selected}>{label}</option>"#,
             value = escape_html(&group.id.to_string()),
             label = escape_html(&group.name),
             selected = if idx == 0 { " selected" } else { "" }
         );
         group_options_for_create.push_str(&option);
         group_options_for_assign.push_str(&format!(
-            "<option value=\"{value}\">{label}</option>",
+            r#"<option value="{value}">{label}</option>"#,
             value = escape_html(&group.id.to_string()),
             label = escape_html(&group.name)
         ));
@@ -71,7 +71,7 @@ pub async fn dashboard(
     let mut table_rows = String::new();
 
     if users.is_empty() {
-        table_rows.push_str("<tr><td colspan=\"5\">当前还没有用户。</td></tr>");
+        table_rows.push_str(r#"<tr><td colspan="5">当前还没有用户。</td></tr>"#);
     } else {
         for user in &users {
             let role = if user.is_admin {
@@ -114,25 +114,25 @@ pub async fn dashboard(
                 };
 
                 chips.push_str(&format!(
-                    "<div class=\"usage-chip\"><span class=\"chip-title\">{title}</span><span>{unit}</span><span>{tokens}</span></div>",
+                    r#"<div class="usage-chip"><span class="chip-title">{title}</span><span>{unit}</span><span>{tokens}</span></div>"#,
                     title = escape_html(descriptor.label),
                     unit = escape_html(&unit_text),
                     tokens = escape_html(&token_text),
                 ));
             }
 
-            let usage_detail_html = format!("<div class=\"usage-grid\">{chips}</div>");
+            let usage_detail_html = format!(r#"<div class="usage-grid">{chips}</div>"#);
             let usage_summary = format!("{total_units} 项 · {total_tokens} 令牌");
 
             let mut group_select = format!(
-                "<form method=\"post\" action=\"/dashboard/users/group\" class=\"inline-form\" onsubmit=\"return confirm('确认更改 {} 的额度组？');\">",
+                r#"<form method="post" action="/dashboard/users/group" class="inline-form" onsubmit="return confirm('确认更改 {} 的额度组？');">"#,
                 escape_html(&user.username)
             );
             group_select.push_str(&format!(
-                "<input type=\"hidden\" name=\"username\" value=\"{}\">",
+                r#"<input type="hidden" name="username" value="{}">"#,
                 escape_html(&user.username)
             ));
-            group_select.push_str("<select name=\"usage_group_id\" class=\"inline-select\" onchange=\"this.form.submit()\">");
+            group_select.push_str(r#"<select name="usage_group_id" class="inline-select" onchange="this.form.submit()">"#);
             for group in &groups {
                 let selected = if group.id == user.usage_group_id {
                     " selected"
@@ -140,7 +140,7 @@ pub async fn dashboard(
                     ""
                 };
                 group_select.push_str(&format!(
-                    "<option value=\"{}\"{}>{}</option>",
+                    r#"<option value="{}"{}>{}</option>"#,
                     escape_html(&group.id.to_string()),
                     selected,
                     escape_html(&group.name)
@@ -149,7 +149,7 @@ pub async fn dashboard(
             group_select.push_str("</select></form>");
 
             table_rows.push_str(&format!(
-                "<tr class=\"user-row {highlight}\" data-user-id=\"{id}\"><td><span class=\"expand-icon\">▶</span> {name}</td><td>{group_dropdown}</td><td>{role}</td><td class=\"usage-summary\">{summary}</td><td class=\"actions\"><button class=\"btn-sm\" onclick=\"toggleUserDetails('{id}')\">详情</button><button class=\"btn-sm btn-warning\" data-username=\"{username}\" onclick=\"resetPassword(this)\">重置密码</button></td></tr>",
+                r#"<tr class="user-row {highlight}" data-user-id="{id}"><td><span class="expand-icon">▶</span> {name}</td><td>{group_dropdown}</td><td>{role}</td><td class="usage-summary">{summary}</td><td class="actions"><button class="btn-sm" onclick="toggleUserDetails('{id}')">详情</button><button class="btn-sm btn-warning" data-username="{username}" onclick="resetPassword(this)">重置密码</button></td></tr>"#,
                 id = user.id,
                 name = escape_html(&user.username),
                 username = escape_html(&user.username),
@@ -160,7 +160,7 @@ pub async fn dashboard(
             ));
 
             table_rows.push_str(&format!(
-                "<tr class=\"user-detail-row\" id=\"detail-{id}\" style=\"display: none;\"><td colspan=\"5\">{usage}</td></tr>",
+                r#"<tr class="user-detail-row" id="detail-{id}" style="display: none;"><td colspan="5">{usage}</td></tr>"#,
                 id = user.id,
                 usage = usage_detail_html
             ));
@@ -170,35 +170,35 @@ pub async fn dashboard(
     let message_block = compose_flash_message(params.status.as_deref(), params.error.as_deref());
 
     let user_controls = format!(
-        r##"<div class=\"admin-actions\">
-    <button class=\"btn-primary\" onclick=\"openCreateUserModal()\">+ 创建用户</button>
+        r##"<div class="admin-actions">
+    <button class="btn-primary" onclick="openCreateUserModal()">+ 创建用户</button>
 </div>
-<div id=\"create-user-modal\" class=\"modal\">
-    <div class=\"modal-content\">
-        <div class=\"modal-header\">
+<div id="create-user-modal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
             <h3>创建新用户</h3>
         </div>
-        <form method=\"post\" action=\"/dashboard/users\">
-            <div class=\"field\">
-                <label for=\"new-username\">用户名</label>
-                <input type=\"text\" id=\"new-username\" name=\"username\" required>
+        <form method="post" action="/dashboard/users">
+            <div class="field">
+                <label for="new-username">用户名</label>
+                <input type="text" id="new-username" name="username" required>
             </div>
-            <div class=\"field\">
-                <label for=\"new-password\">密码</label>
-                <input type=\"password\" id=\"new-password\" name=\"password\" required>
+            <div class="field">
+                <label for="new-password">密码</label>
+                <input type="password" id="new-password" name="password" required>
             </div>
-            <div class=\"field\">
-                <label for=\"new-group\">额度组</label>
-                <select id=\"new-group\" name=\"usage_group_id\" required>
+            <div class="field">
+                <label for="new-group">额度组</label>
+                <select id="new-group" name="usage_group_id" required>
                     {group_options}
                 </select>
             </div>
-            <div class=\"field checkbox\">
-                <label><input type=\"checkbox\" name=\"is_admin\" value=\"on\"> 授予管理员权限</label>
+            <div class="field checkbox">
+                <label><input type="checkbox" name="is_admin" value="on"> 授予管理员权限</label>
             </div>
-            <div class=\"modal-actions\">
-                <button type=\"button\" class=\"btn-sm\" onclick=\"closeCreateUserModal()\">取消</button>
-                <button type=\"submit\" class=\"btn-primary\">创建用户</button>
+            <div class="modal-actions">
+                <button type="button" class="btn-sm" onclick="closeCreateUserModal()">取消</button>
+                <button type="submit" class="btn-primary">创建用户</button>
             </div>
         </form>
     </div>
@@ -206,7 +206,7 @@ pub async fn dashboard(
         group_options = group_options_for_create,
     );
 
-    let mut group_sections = String::from("<h2 class=\"section-title\">管理额度组</h2>");
+    let mut group_sections = String::from(r#"<h2 class="section-title">管理额度组</h2>"#);
     for group in &groups {
         let mut module_fields = String::new();
         for descriptor in usage::REGISTERED_MODULES {
@@ -215,23 +215,23 @@ pub async fn dashboard(
             let tokens_value = limit.and_then(|l| l.token_limit);
 
             let units_attr = units_value
-                .map(|v| format!(" value=\"{}\"", v))
+                .map(|v| format!(r#" value="{}""#, v))
                 .unwrap_or_default();
             let tokens_attr = tokens_value
-                .map(|v| format!(" value=\"{}\"", v))
+                .map(|v| format!(r#" value="{}""#, v))
                 .unwrap_or_default();
 
             module_fields.push_str(&format!(
-                r#"<div class=\"field-set\">
+                r#"<div class="field-set">
         <h3>{title}</h3>
-        <div class=\"dual-inputs\">
-            <div class=\"field\">
-                <label for=\"units-{key}-{id}\">{unit_label}（近 7 日）</label>
-                <input type=\"number\" id=\"units-{key}-{id}\" name=\"units_{key}\"{units_attr} placeholder=\"留空表示不限\" min=\"0\">
+        <div class="dual-inputs">
+            <div class="field">
+                <label for="units-{key}-{id}">{unit_label}（近 7 日）</label>
+                <input type="number" id="units-{key}-{id}" name="units_{key}"{units_attr} placeholder="留空表示不限" min="0">
             </div>
-            <div class=\"field\">
-                <label for=\"tokens-{key}-{id}\">令牌上限（近 7 日）</label>
-                <input type=\"number\" id=\"tokens-{key}-{id}\" name=\"tokens_{key}\"{tokens_attr} placeholder=\"留空表示不限\" min=\"0\">
+            <div class="field">
+                <label for="tokens-{key}-{id}">令牌上限（近 7 日）</label>
+                <input type="number" id="tokens-{key}-{id}" name="tokens_{key}"{tokens_attr} placeholder="留空表示不限" min="0">
             </div>
         </div>
     </div>"#,
@@ -252,30 +252,32 @@ pub async fn dashboard(
         let desc_value_attr = group
             .description
             .as_ref()
-            .map(|d| format!(" value=\"{}\"", escape_html(d)))
+            .map(|d| format!(r#" value="{}""#, escape_html(d)))
             .unwrap_or_default();
 
         let section_id = format!("group-{}", group.id);
         group_sections.push_str(&format!(
-            r##"<section class=\"admin collapsible-section group-panel\">
-    <h2 class=\"section-header\" onclick=\"toggleSection('{section_id}')\">
-        <span class=\"toggle-icon\" id=\"icon-{section_id}\">▶</span> 额度组：{name}
+            r##"<section class="admin collapsible-section group-panel">
+    <h2 class="section-header">
+        <span class="toggle-icon">▶</span> 额度组：{name}
+        <button class="btn-sm" onclick="toggleSection('{section_id}')">Edit</button>
     </h2>
-    <div class=\"section-content collapsed\" id=\"content-{section_id}\">
-        <p class=\"meta-note\">{desc}</p>
-        <form method=\"post\" action=\"/dashboard/usage-groups\">
-            <input type=\"hidden\" name=\"group_id\" value=\"{id}\">
-            <div class=\"field\">
-                <label for=\"group-name-{id}\">组名称</label>
-                <input type=\"text\" id=\"group-name-{id}\" name=\"name\" value=\"{name}\" required>
+    <div class="section-content collapsed" id="content-{section_id}">
+        <p class="meta-note">{desc}</p>
+        <form method="post" action="/dashboard/usage-groups">
+            <input type="hidden" name="group_id" value="{id}">
+            <div class="field">
+                <label for="group-name-{id}">组名称</label>
+                <input type="text" id="group-name-{id}" name="name" value="{name}" required>
             </div>
-            <div class=\"field\">
-                <label for=\"group-desc-{id}\">描述</label>
-                <input type=\"text\" id=\"group-desc-{id}\" name=\"description\"{desc_value_attr} placeholder=\"可选\">
+            <div class="field">
+                <label for="group-desc-{id}">描述</label>
+                <input type="text" id="group-desc-{id}" name="description"{desc_value_attr} placeholder="可选">
             </div>
             {module_fields}
-            <div class=\"action-stack\">
-                <button type=\"submit\" class=\"btn-primary\">保存额度</button>
+            <div class="action-stack">
+                <button type="submit" class="btn-primary">保存额度</button>
+                <button type="button" class="btn-sm" onclick="toggleSection('{section_id}')">Cancel</button>
             </div>
         </form>
     </div>
@@ -292,16 +294,16 @@ pub async fn dashboard(
     let mut new_group_fields = String::new();
     for descriptor in usage::REGISTERED_MODULES {
         new_group_fields.push_str(&format!(
-            r#"<div class=\"field-set\">
+            r#"<div class="field-set">
         <h3>{title}</h3>
-        <div class=\"dual-inputs\">
-            <div class=\"field\">
-                <label for=\"new-units-{key}\">{unit_label}（近 7 日）</label>
-                <input type=\"number\" id=\"new-units-{key}\" name=\"units_{key}\" placeholder=\"留空表示不限\" min=\"0\">
+        <div class="dual-inputs">
+            <div class="field">
+                <label for="new-units-{key}">{unit_label}（近 7 日）</label>
+                <input type="number" id="new-units-{key}" name="units_{key}" placeholder="留空表示不限" min="0">
             </div>
-            <div class=\"field\">
-                <label for=\"new-tokens-{key}\">令牌上限（近 7 日）</label>
-                <input type=\"number\" id=\"new-tokens-{key}\" name=\"tokens_{key}\" placeholder=\"留空表示不限\" min=\"0\">
+            <div class="field">
+                <label for="new-tokens-{key}">令牌上限（近 7 日）</label>
+                <input type="number" id="new-tokens-{key}" name="tokens_{key}" placeholder="留空表示不限" min="0">
             </div>
         </div>
     </div>"#,
@@ -312,28 +314,28 @@ pub async fn dashboard(
     }
 
     let new_group_section = format!(
-        r##"<section class=\"admin\">
+        r##"<section class="admin">
     <h2>创建新额度组</h2>
-    <button class=\"btn-primary\" onclick=\"openCreateGroupModal()\" type=\"button\">+ 创建额度组</button>
-    <div id=\"create-group-modal\" class=\"modal\">
-        <div class=\"modal-content modal-large\">
-            <div class=\"modal-header\">
+    <button class="btn-primary" onclick="openCreateGroupModal()" type="button">+ 创建额度组</button>
+    <div id="create-group-modal" class="modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
                 <h3>新额度组</h3>
             </div>
-            <form method=\"post\" action=\"/dashboard/usage-groups\">
-                <input type=\"hidden\" name=\"group_id\" value=\"\">
-                <div class=\"field\">
-                    <label for=\"new-group-name\">组名称</label>
-                    <input type=\"text\" id=\"new-group-name\" name=\"name\" required>
+            <form method="post" action="/dashboard/usage-groups">
+                <input type="hidden" name="group_id" value="">
+                <div class="field">
+                    <label for="new-group-name">组名称</label>
+                    <input type="text" id="new-group-name" name="name" required>
                 </div>
-                <div class=\"field\">
-                    <label for=\"new-group-desc\">描述</label>
-                    <input type=\"text\" id=\"new-group-desc\" name=\"description\" placeholder=\"可选\">
+                <div class="field">
+                    <label for="new-group-desc">描述</label>
+                    <input type="text" id="new-group-desc" name="description" placeholder="可选">
                 </div>
                 {new_group_fields}
-                <div class=\"modal-actions\">
-                    <button type=\"button\" class=\"btn-sm\" onclick=\"closeCreateGroupModal()\">取消</button>
-                    <button type=\"submit\" class=\"btn-primary\">保存额度</button>
+                <div class="modal-actions">
+                    <button type="button" class="btn-sm" onclick="closeCreateGroupModal()">取消</button>
+                    <button type="submit" class="btn-primary">保存额度</button>
                 </div>
             </form>
         </div>
@@ -485,16 +487,16 @@ pub async fn dashboard(
 </head>
 <body>
     <header>
-        <div class=\"header-bar\">
+        <div class="header-bar">
             <h1>使用情况仪表盘</h1>
-            <a class=\"back-link\" href=\"/\">← 返回首页</a>
+            <a class="back-link" href="/">← 返回首页</a>
         </div>
         <p>管理账号额度，并进入各模块的配置页面。</p>
     </header>
     <main>
-        <p data-user-id=\"{auth_id}\">当前登录：<strong>{username}</strong>。</p>
+        <p data-user-id="{auth_id}">当前登录：<strong>{username}</strong>。</p>
         {message_block}
-        <div class=\"table-wrapper\">
+        <div class="table-wrapper">
             <table>
                 <thead>
                     <tr><th>用户名</th><th>额度组</th><th>角色</th><th>近 7 日使用（摘要）</th><th>操作</th></tr>
@@ -505,33 +507,40 @@ pub async fn dashboard(
             </table>
         </div>
         {user_controls}
-        {group_sections}
-        {new_group}
+        <section class="admin collapsible-section">
+            <h2 class="section-header" onclick="toggleSection('group-management')">
+                <span class="toggle-icon" id="icon-group-management">▶</span> 管理额度组
+            </h2>
+            <div class="section-content collapsed" id="content-group-management">
+                {group_sections}
+                {new_group}
+            </div>
+        </section>
+        <div id="password-modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>重置密码</h3>
+                </div>
+                <form id="password-reset-form" method="post" action="/dashboard/users/password">
+                    <input type="hidden" name="username" value="">
+                    <p>为用户 <strong id="reset-username-display"></strong> 设置新密码：</p>
+                    <div class="field">
+                        <label for="modal-password-input">新密码</label>
+                        <input id="modal-password-input" type="password" name="password" required>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-sm" onclick="closeModal()">取消</button>
+                        <button type="submit" class="btn-primary">确认重置</button>
+                    </div>
+                </form>
+            </div>
+        </div>
         {footer}
     </main>
-    <div id=\"password-modal\" class=\"modal\">
-        <div class=\"modal-content\">
-            <div class=\"modal-header\">
-                <h3>重置密码</h3>
-            </div>
-            <form id=\"password-reset-form\" method=\"post\" action=\"/dashboard/users/password\">
-                <input type=\"hidden\" name=\"username\" value=\"\">
-                <p>为用户 <strong id=\"reset-username-display\"></strong> 设置新密码：</p>
-                <div class=\"field\">
-                    <label for=\"modal-password-input\">新密码</label>
-                    <input id=\"modal-password-input\" type=\"password\" name=\"password\" required>
-                </div>
-                <div class=\"modal-actions\">
-                    <button type=\"button\" class=\"btn-sm\" onclick=\"closeModal()\">取消</button>
-                    <button type=\"submit\">确认重置</button>
-                </div>
-            </form>
-        </div>
-    </div>
     <script>
         function toggleUserDetails(userId) {{
             const detailRow = document.getElementById('detail-' + userId);
-            const userRow = document.querySelector('tr.user-row[data-user-id=\"' + userId + '\"]');
+            const userRow = document.querySelector('tr.user-row[data-user-id="' + userId + '"]');
 
             if (detailRow.style.display === 'none') {{
                 detailRow.style.display = 'table-row';
@@ -548,10 +557,14 @@ pub async fn dashboard(
 
             if (content.classList.contains('collapsed')) {{
                 content.classList.remove('collapsed');
-                icon.textContent = '▼';
+                if (icon) {{
+                    icon.textContent = '▼';
+                }}
             }} else {{
                 content.classList.add('collapsed');
-                icon.textContent = '▶';
+                if (icon) {{
+                    icon.textContent = '▶';
+                }}
             }}
         }}
 
@@ -563,7 +576,7 @@ pub async fn dashboard(
             const form = document.getElementById('password-reset-form');
 
             usernameSpan.textContent = username;
-            form.querySelector('input[name=\"username\"]').value = username;
+            form.querySelector('input[name="username"]').value = username;
             passwordInput.value = '';
 
             modal.style.display = 'block';

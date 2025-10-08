@@ -49,7 +49,7 @@ pub fn render_login_page() -> String {
 pub fn render_footer() -> String {
     let current_year = Utc::now().year();
     format!(
-        "<footer class=\"app-footer\">© 2024-{year} 张圆教授课题组，仅限内部使用</footer>",
+        r#"<footer class="app-footer">© 2024-{year} 张圆教授课题组，仅限内部使用</footer>"#,
         year = current_year
     )
 }

@@ -18,6 +18,28 @@
 - Add observability in admin dashboard (logging, metrics) suitable for Railway deployment.
 - Implement rate limiting per user based on usage metrics (requests/tokens) stored in persistent storage.
 
+## Project Structure
+- `Cargo.toml` / `Cargo.lock`: define crate metadata, dependencies, features, and lock the exact versions used to build the toolkit.
+- `src/main.rs`: bootstraps the Axum server, wires tracing, constructs `AppState`, and delegates HTTP wiring to `web::router::build_router`.
+- `src/config.rs`: owns persistent configuration (`ModuleSettings`, model/prompt storage hooks) and the `ensure_defaults` logic that seeds module settings on startup.
+- `src/usage.rs`: centralizes per-user usage accounting, module registration (`REGISTERED_MODULES`), and rate-limit helpers consumed by every tool.
+- `src/llm/mod.rs`: shared OpenRouter/Poe client wrapper (`LlmClient`) plus request/response types, file attachments, and provider abstractions consumed across modules.
+- `src/web/`: all HTTP-facing concerns.
+  - `state.rs`: defines `AppState` (database pool, LLM client, config cache) and helpers for sharing application resources.
+  - `router.rs`: constructs the Axum `Router` by mounting auth, admin, landing, and per-module routes and serving static assets like `robots.txt`.
+  - `auth.rs`: middleware and handlers for credential-based login, session management, and guards reused by module routers.
+  - `landing.rs`: renders the "Zhang Group AI Toolkit" entry page with navigation cards for every registered tool.
+  - `admin_utils.rs`, `data.rs`, `models.rs`, `templates.rs`: shared HTML builders, SQL helpers, and typed query utilities used by dashboard views.
+  - `admin/`: feature-specific admin UI submodules (`users.rs`, `usage_groups.rs`, `dashboard.rs`, `glossary.rs`, `journals.rs`, `auth.rs`) plus `types.rs` and `mod.rs` for routing helpers.
+- `src/modules/`: encapsulated tool implementations with their own routers and admin surfaces.
+  - `summarizer/`, `translatedocx/`, `grader/`: each exports `mod.rs` (tool router, handlers, background orchestration) and `admin.rs` (settings/prompt management pages).
+  - `admin_shared.rs`: reusable styles, layout helpers, and widgets for module admin pages.
+  - `mod.rs`: registers module routers with the main application and provides shared traits/enums for module discovery.
+- `migrations/`: ordered Postgres migrations (`0001_init.sql` … `0009_usage_limits.sql`) defining users, glossary, job tracking tables, module configuration storage, and usage limit schema.
+- `robots.txt`: served for web crawlers via `web::router`.
+- `target/`: Cargo build artifacts (ignored in version control) useful for local compilation caching.
+- `storage/`: runtime directory (ignored by Git) where background jobs persist generated files, summaries, and translated documents.
+
 ### Current Web Application Layout (2025-xx)
 - `src/web/` owns all HTTP-facing logic: `state.rs` (shared `AppState`), `landing.rs`, `auth.rs`, and `admin.rs` (user & usage dashboards), plus `data.rs`, `models.rs`, and `templates.rs` for reusable queries and HTML.
 - Module-specific admin pages live alongside each tool (`src/modules/<tool>/admin.rs`) and register their settings routes from the module router; shared styling/widgets sit in `src/modules/admin_shared.rs` and helpers in `src/web/admin_utils.rs`.

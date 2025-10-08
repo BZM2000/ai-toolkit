@@ -179,7 +179,7 @@ pub fn render_glossary_section(terms: &[GlossaryTermRow], redirect: &str) -> Str
     let mut select_options = String::new();
 
     if terms.is_empty() {
-        rows.push_str("<tr><td colspan=\\\"4\\\">尚未添加术语。</td></tr>");
+        rows.push_str(r#"<tr><td colspan="4">尚未添加术语。</td></tr>"#);
     } else {
         for term in terms {
             rows.push_str(&format!(
@@ -208,7 +208,7 @@ pub fn render_glossary_section(terms: &[GlossaryTermRow], redirect: &str) -> Str
             ));
 
             select_options.push_str(&format!(
-                "<option value=\"{id}\">{label}</option>",
+                r#"<option value="{id}">{label}</option>"#,
                 id = term.id,
                 label = escape_html(&term.source_term)
             ));
@@ -284,7 +284,7 @@ pub fn render_topic_section(topics: &[JournalTopicRow], redirect: &str) -> Strin
     let mut rows = String::new();
 
     if topics.is_empty() {
-        rows.push_str("<tr><td colspan=\\\"4\\\">尚未添加主题。</td></tr>");
+        rows.push_str(r#"<tr><td colspan="4">尚未添加主题。</td></tr>"#);
     } else {
         for topic in topics {
             let description = topic
@@ -374,7 +374,7 @@ pub fn render_journal_section(
 
     let mut rows = String::new();
     if references.is_empty() {
-        rows.push_str("<tr><td colspan=\\\"6\\\">尚未添加期刊参考。</td></tr>");
+        rows.push_str(r#"<tr><td colspan="6">尚未添加期刊参考。</td></tr>"#);
     } else {
         for reference in references {
             let mark = reference
@@ -444,7 +444,7 @@ pub fn render_journal_section(
     }
 
     let score_inputs = if topics.is_empty() {
-        "<p class=\\\"section-note\\\">暂无主题，请先添加主题后再录入分值。</p>".to_string()
+        r#"<p class="section-note">暂无主题，请先添加主题后再录入分值。</p>"#.to_string()
     } else {
         let fields = topics
             .iter()
@@ -452,13 +452,13 @@ pub fn render_journal_section(
                 let mut options = String::new();
                 for value in 0..=2 {
                     options.push_str(&format!(
-                        "<option value=\\\"{value}\\\"{selected}>{value}</option>",
+                        r#"<option value="{value}"{selected}>{value}</option>"#,
                         value = value,
                         selected = if value == 0 { " selected" } else { "" },
                     ));
                 }
                 format!(
-                    r#"<div class=\"topic-picker\" data-topic=\"{id}\"><label for=\"score-{id}\">{name}</label><select id=\"score-{id}\" name=\"score_{id}\" data-topic-select=\"{id}\">{options}</select></div>"#,
+                    r#"<div class="topic-picker" data-topic="{id}"><label for="score-{id}">{name}</label><select id="score-{id}" name="score_{id}" data-topic-select="{id}">{options}</select></div>"#,
                     id = topic.id,
                     name = escape_html(&topic.name),
                     options = options,
@@ -466,7 +466,7 @@ pub fn render_journal_section(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        format!("<div class=\"topic-grid\">{fields}</div>", fields = fields,)
+        format!(r#"<div class="topic-grid">{fields}</div>"#, fields = fields,)
     };
 
     let mut section_html = format!(

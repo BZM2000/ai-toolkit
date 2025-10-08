@@ -72,7 +72,7 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
         .iter()
         .map(|(title, description, href)| {
             format!(
-                "<a class=\"module-card\" href=\"{href}\"><h2>{title}</h2><p>{description}</p><span class=\"cta\">进入工具 →</span></a>",
+                r#"<a class="module-card" href="{href}"><h2>{title}</h2><p>{description}</p><span class="cta">进入工具 →</span></a>"#,
                 title = escape_html(title),
                 description = escape_html(description),
                 href = href,
@@ -81,7 +81,7 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
         .collect::<String>();
 
     let admin_button = if user.is_admin {
-        "<a class=\"admin-link\" href=\"/dashboard\">管理后台</a>".to_string()
+        r#"<a class="admin-link" href="/dashboard">管理后台</a>"#.to_string()
     } else {
         String::new()
     };
@@ -154,7 +154,7 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
 fn compose_landing_flash(params: &LandingQuery) -> String {
     if let Some(status) = params.status.as_deref() {
         if status == "logged_out" {
-            return "<div class=\"flash success\">已退出登录。</div>".to_string();
+            return r#"<div class="flash success">已退出登录。</div>"#.to_string();
         }
     }
 
@@ -164,7 +164,7 @@ fn compose_landing_flash(params: &LandingQuery) -> String {
             _ => "发生未知错误，请稍后重试。",
         };
 
-        return format!("<div class=\"flash error\">{message}</div>");
+        return format!(r#"<div class="flash error">{message}</div>"#);
     }
 
     String::new()

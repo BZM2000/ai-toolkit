@@ -74,7 +74,7 @@ async fn summarizer_page(
 
     let footer = render_footer();
     let admin_link = if user.is_admin {
-        "<a class=\"admin-link\" href=\"/dashboard/modules/summarizer\">模块管理</a>"
+        r#"<a class="admin-link" href="/dashboard/modules/summarizer">模块管理</a>"#
     } else {
         ""
     };
@@ -758,7 +758,7 @@ async fn serve_file(path: &Path, original_name: &str, suffix: &str) -> Result<Re
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        header::HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
+        header::HeaderValue::from_str(&format!(r#"attachment; filename="{}""#, filename))
             .unwrap_or_else(|_| header::HeaderValue::from_static("attachment")),
     );
 
