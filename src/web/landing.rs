@@ -66,6 +66,11 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
             "评估稿件投稿级别并给出匹配期刊建议。",
             "/tools/grader",
         ),
+        (
+            "审稿助手",
+            "上传学术稿件，通过8个模型并行审稿，生成元审稿报告和事实核查。",
+            "/tools/reviewer",
+        ),
     ];
 
     let module_cards = modules

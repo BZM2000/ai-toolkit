@@ -12,6 +12,7 @@ const WINDOW_DURATION: Duration = Duration::days(WINDOW_DAYS);
 pub const MODULE_SUMMARIZER: &str = "summarizer";
 pub const MODULE_TRANSLATE_DOCX: &str = "translatedocx";
 pub const MODULE_GRADER: &str = "grader";
+pub const MODULE_REVIEWER: &str = "reviewer";
 
 /// Human readable labels for known modules to drive forms and display.
 pub struct ModuleDescriptor {
@@ -35,6 +36,11 @@ pub const REGISTERED_MODULES: &[ModuleDescriptor] = &[
         key: MODULE_GRADER,
         label: "稿件评估",
         unit_label: "任务次数",
+    },
+    ModuleDescriptor {
+        key: MODULE_REVIEWER,
+        label: "审稿助手",
+        unit_label: "稿件数量",
     },
 ];
 

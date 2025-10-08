@@ -7,7 +7,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    config::{DocxTranslatorSettings, GraderSettings, ModuleSettings, SummarizerSettings},
+    config::{DocxTranslatorSettings, GraderSettings, ModuleSettings, ReviewerSettings, SummarizerSettings},
     llm::LlmClient,
 };
 
@@ -111,6 +111,11 @@ impl AppState {
     pub async fn grader_settings(&self) -> Option<GraderSettings> {
         let guard = self.settings.read().await;
         guard.grader().cloned()
+    }
+
+    pub async fn reviewer_settings(&self) -> Option<ReviewerSettings> {
+        let guard = self.settings.read().await;
+        guard.reviewer().cloned()
     }
 
     pub async fn reload_settings(&self) -> Result<()> {

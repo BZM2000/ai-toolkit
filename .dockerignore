@@ -1,0 +1,28 @@
+# Build artifacts
+target/
+storage/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+CLAUDE.md
+
+# Development files
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# macOS
+.DS_Store
+
+# Railway
+railway.json
+
+# Logs
+*.log
