@@ -4,7 +4,7 @@ use chrono::{Datelike, Utc};
 
 const TOOL_PAGE_BASE_STYLES: &str = r#"
         :root { color-scheme: light; }
-        body { font-family: \"Helvetica Neue\", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
+        body { font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }
         header { background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }
         .header-bar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
         .back-link { display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }
@@ -18,7 +18,7 @@ const TOOL_PAGE_BASE_STYLES: &str = r#"
         label { display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }
         select { width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }
         select:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
-        input[type=\"checkbox\"] { margin-right: 0.5rem; }
+        input[type="checkbox"] { margin-right: 0.5rem; }
         button { padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }
         button:hover { background: #1d4ed8; }
         button:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -96,7 +96,7 @@ pub fn render_tool_page(layout: ToolPageLayout<'_>) -> String {
     let admin_link_html = admin_link
         .map(|link| {
             format!(
-                r#"<a class=\"admin-link\" href=\"{href}\">{label}</a>"#,
+                r#"<a class="admin-link" href="{href}">{label}</a>"#,
                 href = link.href,
                 label = link.label,
             )
@@ -117,37 +117,37 @@ pub fn render_tool_page(layout: ToolPageLayout<'_>) -> String {
 
     format!(
         r#"<!DOCTYPE html>
-<html lang=\"zh-CN\">
+<html lang="zh-CN">
 <head>
-    <meta charset=\"UTF-8\">
+    <meta charset="UTF-8">
     <title>{meta_title}</title>
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
-    <meta name=\"robots\" content=\"noindex,nofollow\">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
     <style>
 {styles}
     </style>
 </head>
 <body>
     <header>
-        <div class=\"header-bar\">
+        <div class="header-bar">
             <h1>{page_heading}</h1>
-            <div style=\"display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;\">
-                <a class=\"back-link\" href=\"/\">← 返回首页</a>
+            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+                <a class="back-link" href="/">← 返回首页</a>
                 {admin_link_html}
             </div>
         </div>
-        <p class=\"note\">{note_html}</p>
+        <p class="note">{note_html}</p>
     </header>
     <main>
-        <div class=\"tool-tabs\" data-tab-group=\"{tab_group}\">
-            <button type=\"button\" class=\"tab-toggle active\" data-tab-target=\"new\">{new_tab_label}</button>
-            <button type=\"button\" class=\"tab-toggle\" data-tab-target=\"history\">{history_tab_label}</button>
+        <div class="tool-tabs" data-tab-group="{tab_group}">
+            <button type="button" class="tab-toggle active" data-tab-target="new">{new_tab_label}</button>
+            <button type="button" class="tab-toggle" data-tab-target="history">{history_tab_label}</button>
         </div>
-        <div class=\"tab-container\" data-tab-container=\"{tab_group}\">
-            <div class=\"tab-section active\" data-tab-panel=\"new\">
+        <div class="tab-container" data-tab-container="{tab_group}">
+            <div class="tab-section active" data-tab-panel="new">
 {new_tab_html}
             </div>
-            <div class=\"tab-section\" data-tab-panel=\"history\">
+            <div class="tab-section" data-tab-panel="history">
 {history_panel_html}
             </div>
         </div>
