@@ -11,7 +11,7 @@ use tracing::error;
 
 use crate::history;
 use crate::web::{
-    ApiMessage, AppState,
+    ApiMessage, AppState, JobStatus,
     auth::{self, JsonAuthError},
     history_ui, json_error,
 };
@@ -35,6 +35,7 @@ pub(crate) struct HistoryItem {
     created_at: String,
     updated_at: Option<String>,
     status: Option<String>,
+    status_label: Option<String>,
     status_detail: Option<String>,
     files_purged: bool,
     supports_downloads: bool,
@@ -93,6 +94,10 @@ pub async fn recent_history(
                 job_key: entry.job_key,
                 created_at: entry.created_at.to_rfc3339(),
                 updated_at: entry.updated_at.map(|ts| ts.to_rfc3339()),
+                status_label: entry
+                    .status
+                    .as_deref()
+                    .map(|status| JobStatus::from_str(status).label_zh().to_string()),
                 status: entry.status,
                 status_detail: entry.status_detail,
                 files_purged: entry.files_purged,

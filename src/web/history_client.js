@@ -136,7 +136,7 @@
     const row = document.createElement('tr');
     row.className = 'history-row';
 
-    const statusLabel = translateStatus(job.status);
+    const statusLabel = job.status_label || translateStatus(job.status);
     const updatedLabel = formatDateTime(job.updated_at);
     const createdLabel = formatDateTime(job.created_at);
 
@@ -210,7 +210,8 @@
 
     const summaryParts = [];
     if (status.status) {
-      summaryParts.push(`<strong>状态：</strong>${escapeHtml(translateStatus(status.status))}`);
+      const label = status.status_label || translateStatus(status.status);
+      summaryParts.push(`<strong>状态：</strong>${escapeHtml(label)}`);
     }
     if (status.status_detail) {
       summaryParts.push(`<strong>说明：</strong>${escapeHtml(status.status_detail)}`);

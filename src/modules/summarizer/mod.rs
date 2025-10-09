@@ -43,7 +43,7 @@ use crate::{
     render_footer,
     usage::{self, MODULE_SUMMARIZER},
     web::{
-        AccessMessages, ApiMessage, JobSubmission,
+        AccessMessages, ApiMessage, JobStatus, JobSubmission, STATUS_CLIENT_SCRIPT,
         auth::{self, JsonAuthError},
         ensure_storage_root, json_error, require_path, verify_job_access,
     },
@@ -205,22 +205,21 @@ function pollStatus() {
     });
 }
 
-function translateStatus(status) {
-    const map = {
-        pending: '待处理',
-        processing: '处理中',
-        completed: '已完成',
-        failed: '已失败',
-        queued: '排队中',
-    };
-    return map[status] || status;
+function getStatusLabel(status, label) {
+    if (label) {
+        return label;
+    }
+    if (typeof window !== 'undefined' && window.translateJobStatus) {
+        return window.translateJobStatus(status);
+    }
+    return status || '';
 }
 
 function renderStatus(payload) {
     let docRows = payload.documents.map((doc) => {
         const detail = doc.status_detail ? `<div class="note">${doc.status_detail}</div>` : '';
         const error = doc.error_message ? `<div class="note">${doc.error_message}</div>` : '';
-        const statusLabel = translateStatus(doc.status);
+        const statusLabel = getStatusLabel(doc.status, doc.status_label);
         return `<tr><td>${doc.original_filename}</td><td>${statusLabel}</td></tr>${detail ? `<tr><td colspan=2>${detail}</td></tr>` : ''}${error ? `<tr><td colspan=2>${error}</td></tr>` : ''}`;
     }).join('');
     if (!docRows) {
@@ -232,7 +231,7 @@ function renderStatus(payload) {
     const combinedBlock = combinedSummary || combinedTranslation ? `<p class="downloads">${combinedSummary} ${combinedTranslation}</p>` : '';
     const errorBlock = payload.error_message ? `<p class="note">${payload.error_message}</p>` : '';
     const detailBlock = payload.status_detail ? `<p class="note">${payload.status_detail}</p>` : '';
-    const jobStatusLabel = translateStatus(payload.status);
+    const jobStatusLabel = getStatusLabel(payload.status, payload.status_label);
 
     jobStatus.innerHTML = `
         <div class="status">
@@ -266,6 +265,7 @@ function renderStatus(payload) {
             Cow::Borrowed(UPLOAD_WIDGET_STYLES),
         ],
         body_scripts: vec![
+            Cow::Borrowed(STATUS_CLIENT_SCRIPT),
             Cow::Borrowed(UPLOAD_WIDGET_SCRIPT),
             Cow::Owned(format!(
                 "<script>
@@ -435,18 +435,25 @@ async fn job_status(
 
     let docs = documents
         .into_iter()
-        .map(|doc| JobDocumentStatus {
-            id: doc.id,
-            original_filename: doc.original_filename,
-            status: doc.status,
-            status_detail: doc.status_detail,
-            error_message: doc.error_message,
+        .map(|doc| {
+            let status = JobStatus::from_str(&doc.status);
+            JobDocumentStatus {
+                id: doc.id,
+                original_filename: doc.original_filename,
+                status_label: status.label_zh().to_string(),
+                status,
+                status_detail: doc.status_detail,
+                error_message: doc.error_message,
+            }
         })
         .collect();
 
+    let status = JobStatus::from_str(&job.status);
+
     let response = JobStatusResponse {
         job_id: job.id,
-        status: job.status,
+        status_label: status.label_zh().to_string(),
+        status,
         status_detail: job.status_detail,
         error_message: job.error_message,
         created_at: job.created_at.to_rfc3339(),
@@ -1301,7 +1308,8 @@ impl JobAccess for CombinedJobRecord {
 #[derive(Serialize)]
 struct JobStatusResponse {
     job_id: Uuid,
-    status: String,
+    status: JobStatus,
+    status_label: String,
     status_detail: Option<String>,
     error_message: Option<String>,
     created_at: String,
@@ -1315,7 +1323,8 @@ struct JobStatusResponse {
 struct JobDocumentStatus {
     id: Uuid,
     original_filename: String,
-    status: String,
+    status: JobStatus,
+    status_label: String,
     status_detail: Option<String>,
     error_message: Option<String>,
 }

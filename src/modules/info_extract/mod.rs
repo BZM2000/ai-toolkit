@@ -43,7 +43,7 @@ use crate::{
     render_footer,
     usage::{self, MODULE_INFO_EXTRACT},
     web::{
-        AccessMessages, ApiMessage, JobSubmission,
+        AccessMessages, ApiMessage, JobStatus, JobSubmission, STATUS_CLIENT_SCRIPT,
         auth::{self, JsonAuthError},
         ensure_storage_root, json_error, require_path, stream_file, verify_job_access,
     },
@@ -83,7 +83,8 @@ pub fn router() -> Router<AppState> {
 #[derive(Serialize)]
 struct JobStatusResponse {
     job_id: Uuid,
-    status: String,
+    status: JobStatus,
+    status_label: String,
     status_detail: Option<String>,
     error_message: Option<String>,
     result_download_url: Option<String>,
@@ -94,7 +95,8 @@ struct JobStatusResponse {
 struct JobDocumentStatus {
     id: Uuid,
     original_filename: String,
-    status: String,
+    status: JobStatus,
+    status_label: String,
     status_detail: Option<String>,
     error_message: Option<String>,
     attempt_count: i32,
@@ -230,6 +232,16 @@ const documentsInput = document.getElementById('documents');
 const specInput = document.getElementById('spec');
 let pollTimer = null;
 
+const getStatusLabel = (status, label) => {
+    if (label) {
+        return label;
+    }
+    if (typeof window !== 'undefined' && window.translateJobStatus) {
+        return window.translateJobStatus(status);
+    }
+    return status || '';
+};
+
 const resetStatus = () => {
     statusBox.textContent = '';
     statusBox.classList.remove('error', 'success');
@@ -259,12 +271,13 @@ const renderJobStatus = (payload) => {
     const rows = payload.documents.map((doc) => {
         const status = doc.status || 'pending';
         const tagClass = `status-tag ${status}`;
+        const label = getStatusLabel(status, doc.status_label);
         const detail = doc.status_detail ? `<div class="note">${doc.status_detail}</div>` : '';
         const error = doc.error_message ? `<div class="note" style="color:#b91c1c;">${doc.error_message}</div>` : '';
         return `
             <tr>
                 <td>${doc.original_filename}</td>
-                <td><span class="${tagClass}">${status}</span></td>
+                <td><span class="${tagClass}">${label}</span></td>
                 <td>${doc.attempt_count ?? 0}</td>
             </tr>
             ${detail}
@@ -278,9 +291,11 @@ const renderJobStatus = (payload) => {
     const statusDetail = payload.status_detail ? `<p class="note">${payload.status_detail}</p>` : '';
     const errorBlock = payload.error_message ? `<p class="note" style="color:#b91c1c;">${payload.error_message}</p>` : '';
 
+    const jobStatusLabel = getStatusLabel(payload.status, payload.status_label);
+
     jobStatus.innerHTML = `
         <div class="status">
-            <p><strong>任务状态：</strong> ${payload.status}</p>
+            <p><strong>任务状态：</strong> ${jobStatusLabel}</p>
             ${statusDetail}
             ${errorBlock}
             <table class="job-table">
@@ -382,6 +397,7 @@ form.addEventListener('submit', async (event) => {
             extra_styles,
         ],
         body_scripts: vec![
+            Cow::Borrowed(STATUS_CLIENT_SCRIPT),
             Cow::Borrowed(UPLOAD_WIDGET_SCRIPT),
             Cow::Owned(format!(
                 "<script>
@@ -600,19 +616,26 @@ async fn job_status(
 
     let documents = documents
         .into_iter()
-        .map(|doc| JobDocumentStatus {
-            id: doc.id,
-            original_filename: doc.original_filename,
-            status: doc.status,
-            status_detail: doc.status_detail,
-            error_message: doc.error_message,
-            attempt_count: doc.attempt_count,
+        .map(|doc| {
+            let status = JobStatus::from_str(&doc.status);
+            JobDocumentStatus {
+                id: doc.id,
+                original_filename: doc.original_filename,
+                status_label: status.label_zh().to_string(),
+                status,
+                status_detail: doc.status_detail,
+                error_message: doc.error_message,
+                attempt_count: doc.attempt_count,
+            }
         })
         .collect();
 
+    let status = JobStatus::from_str(&job.status);
+
     Ok(Json(JobStatusResponse {
         job_id,
-        status: job.status,
+        status_label: status.label_zh().to_string(),
+        status,
         status_detail: job.status_detail,
         error_message: job.error_message,
         result_download_url,

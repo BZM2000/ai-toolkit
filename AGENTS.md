@@ -130,6 +130,9 @@
 - `src/web/storage.rs` centralises `ensure_storage_root`, `verify_job_access` (with `AccessMessages`), `require_path`, and `stream_file` so modules share directory setup and download safeguards.
 - Summarizer, DOCX translator, info extract, and reviewer now rely on these helpers for owner/admin checks, `files_purged_at` enforcement, and consistent attachment headers.
 
+### Status Modeling
+- `src/web/status.rs` provides the `JobStatus` enum (with Serde support) and `STATUS_CLIENT_SCRIPT` to expose `window.translateJobStatus` across front-end contexts.
+- APIs now emit `status` + `status_label`, enabling module UIs and history panels to display consistent Chinese labels without duplicating translation maps.
 ## Building a New Tool Module
 1. **Module skeleton**: create `src/modules/<tool>/mod.rs` with a `Router<AppState>` exposing `/tools/<tool>` and `/api/<tool>` endpoints. Use `auth::require_user_redirect` for HTML handlers and `auth::current_user_or_json_error` (or `current_user`) inside API routes to enforce sessions consistently.
    - Return JSON errors via `json_error` (or module-specific wrappers) and reuse `JobSubmission::new` for async job acknowledgements.
@@ -139,8 +142,9 @@
 5. **Admin UI wiring**: add a `modules::<tool>::admin` module to serve settings pages, wire its routes from the tool router, and reuse shared HTML helpers (`modules::admin_shared::MODULE_ADMIN_SHARED_STYLES`). POST handlers should call `state.reload_settings()` after writes.
 6. **Usage metering**: register the module in `src/usage.rs` (`REGISTERED_MODULES`) with proper unit/token labels and incorporate limit checks in the module’s request path.
 7. **History & retention hooks**: after inserting a new job, call `history::record_job_start(&pool, MODULE_<TOOL>, user_id, job_id)` so it appears in `/api/history` and the shared panels. Expose status/download endpoints that tolerate missing files and clear stored paths once `files_purged_at` is set.
-8. **Downloads:** guard job fetches with `verify_job_access` (supplying module-specific `AccessMessages`), validate optional paths via `require_path`, and stream outputs with `stream_file`.
-9. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool, consider adding a `/jobs` panel card if it requires special messaging, and add docs/tests as necessary.
+8. **Status modeling**: return `JobStatus` (or strings convertible via `JobStatus::from_str`) alongside `status_label`, and embed `STATUS_CLIENT_SCRIPT` so front-end code can call `window.translateJobStatus` when no label is provided.
+9. **Downloads:** guard job fetches with `verify_job_access` (supplying module-specific `AccessMessages`), validate optional paths via `require_path`, and stream outputs with `stream_file`.
+10. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool, consider adding a `/jobs` panel card if it requires special messaging, and add docs/tests as necessary.
 
 ## Tool Modules
 
@@ -222,7 +226,7 @@
 ## Centralisation Masterplan
 - **Unified auth/session helpers**: expose shared `require_user` variants from `web::auth` so modules depend on a single guard implementation (HTML redirect + JSON error adapters) instead of duplicating SQL session checks and `SessionUser` structs.
 - **Shared API response scaffolding** ✅ `web::responses` now provides `ApiMessage`, `JobSubmission`, and `json_error` used across modules for consistent errors and submissions.
-- **Consistent job status modeling**: define a core `JobStatus` enum + serde helpers and bundle a shared front-end label map, keeping Axum responses and UI tags in sync across modules and the history panel.
+- **Consistent job status modeling** ✅ `web::status::{JobStatus, STATUS_CLIENT_SCRIPT}` powers unified status enums/labels across APIs and front-end scripts (summarizer, translator, info_extract, reviewer, history).
 - **Storage & download utilities** ✅ `web::storage` now hosts `ensure_storage_root`, `verify_job_access`, `AccessMessages`, `require_path`, and `stream_file`; download endpoints across summarizer, translator, info_extract, and reviewer consume these helpers.
 - **Job poller client kit**: publish a shared JS initializer (e.g., `window.initJobForm`) that wraps FormData submission, status messaging, and polling intervals so each tool only supplies render callbacks.
 
@@ -293,4 +297,6 @@
 - 2025-10-11 (Codex agent): 统一工具页布局，新增 `ToolPageLayout`/`render_tool_page` 并迁移五个模块以复用共享 header/标签页壳，更新新模块指南与文档说明，`cargo check` 通过。
 - 2025-10-11 (Codex agent): Centralised session guards via `web::auth::{current_user, require_user_redirect, current_user_or_json_error}`; removed per-module `SessionUser` structs and aligned history/api handlers to the shared helpers, `cargo fmt` + `cargo check` clean.
 - 2025-10-11 (Codex agent): Introduced shared response helpers (`web::responses::{ApiMessage, JobSubmission, json_error}`), migrated four async modules plus history/reviewer to reuse them, and refreshed docs/tests with `cargo fmt` + `cargo check`.
+- 2025-10-11 (Codex agent): Centralised storage/download handling via `web::storage` (`ensure_storage_root`, `verify_job_access`, `require_path`, `stream_file`); updated summarizer, translator, info_extract, and reviewer download flows, docs refreshed, `cargo fmt` + `cargo check` clean.
+- 2025-10-11 (Codex agent): Introduced shared `JobStatus` enum and status script; migrated summarizer, DOCX translator, info_extract, reviewer, and history UIs to consume unified status labels, `cargo fmt` + `cargo check` clean.
 - 2025-10-11 (Codex agent): Centralised storage/download access via `web::storage` helpers; updated summarizer, DOCX translator, info_extract, and reviewer to reuse `verify_job_access`, `require_path`, `stream_file`, and shared `ensure_storage_root`, `cargo fmt` + `cargo check` clean.
