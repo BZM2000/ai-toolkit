@@ -57,10 +57,6 @@ pub fn router() -> Router<AppState> {
         .route("/tools/summarizer/jobs", post(create_job))
         .route("/api/summarizer/jobs/:id", get(job_status))
         .route(
-            "/api/summarizer/jobs/:id/documents/:doc_id/download/:variant",
-            get(download_document_output),
-        )
-        .route(
             "/api/summarizer/jobs/:id/combined/:variant",
             get(download_combined_output),
         )
@@ -264,16 +260,13 @@ async fn summarizer_page(
 
         function renderStatus(payload) {{
             let docRows = payload.documents.map((doc) => {{
-                const summaryLink = doc.summary_download_url ? `<a href="${{doc.summary_download_url}}">摘要</a>` : '';
-                const translationLink = doc.translation_download_url ? `<a href="${{doc.translation_download_url}}">译文</a>` : '';
-                const downloads = summaryLink || translationLink ? `<div class="downloads">${{summaryLink}}${{translationLink}}</div>` : '';
                 const detail = doc.status_detail ? `<div class="note">${{doc.status_detail}}</div>` : '';
                 const error = doc.error_message ? `<div class="note">${{doc.error_message}}</div>` : '';
                 const statusLabel = translateStatus(doc.status);
-                return `<tr><td>${{doc.original_filename}}</td><td>${{statusLabel}}</td><td>${{downloads}}</td></tr>${{detail ? `<tr><td colspan=3>${{detail}}</td></tr>` : ''}}{{error ? `<tr><td colspan=3>${{error}}</td></tr>` : ''}}`;
+                return `<tr><td>${{doc.original_filename}}</td><td>${{statusLabel}}</td></tr>${{detail ? `<tr><td colspan=2>${{detail}}</td></tr>` : ''}}{{error ? `<tr><td colspan=2>${{error}}</td></tr>` : ''}}`;
             }}).join('');
             if (!docRows) {{
-                docRows = '<tr><td colspan="3">暂无文件记录。</td></tr>';
+                docRows = '<tr><td colspan="2">暂无文件记录。</td></tr>';
             }}
 
             const combinedSummary = payload.combined_summary_url ? `<a href="${{payload.combined_summary_url}}">下载汇总摘要</a>` : '';
@@ -289,7 +282,7 @@ async fn summarizer_page(
                     ${{detailBlock}}
                     ${{errorBlock}}
                     <table>
-                        <thead><tr><th>文件名</th><th>状态</th><th>下载</th></tr></thead>
+                        <thead><tr><th>文件名</th><th>状态</th></tr></thead>
                         <tbody>${{docRows}}</tbody>
                     </table>
                     ${{combinedBlock}}
@@ -447,7 +440,7 @@ async fn job_status(
     }
 
     let documents = sqlx::query_as::<_, DocumentRecord>(
-        "SELECT id, original_filename, status, status_detail, summary_path, translation_path, error_message FROM summary_documents WHERE job_id = $1 ORDER BY ordinal",
+        "SELECT id, original_filename, status, status_detail, error_message FROM summary_documents WHERE job_id = $1 ORDER BY ordinal",
     )
     .bind(job_id)
     .fetch_all(&pool)
@@ -462,18 +455,6 @@ async fn job_status(
             status: doc.status,
             status_detail: doc.status_detail,
             error_message: doc.error_message,
-            summary_download_url: doc.summary_path.map(|_| {
-                format!(
-                    "/api/summarizer/jobs/{}/documents/{}/download/summary",
-                    job_id, doc.id
-                )
-            }),
-            translation_download_url: doc.translation_path.map(|_| {
-                format!(
-                    "/api/summarizer/jobs/{}/documents/{}/download/translation",
-                    job_id, doc.id
-                )
-            }),
         })
         .collect();
 
@@ -494,72 +475,6 @@ async fn job_status(
     };
 
     Ok(Json(response))
-}
-
-async fn download_document_output(
-    State(state): State<AppState>,
-    jar: CookieJar,
-    AxumPath(params): AxumPath<(Uuid, Uuid, String)>,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    let (job_id, document_id, variant) = params;
-    let user = require_user(&state, &jar)
-        .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
-
-    let pool = state.pool();
-
-    let document = sqlx::query_as::<_, DocumentDownloadRecord>(
-        "SELECT j.user_id, d.original_filename, d.summary_path, d.translation_path FROM summary_documents d INNER JOIN summary_jobs j ON j.id = d.job_id WHERE d.id = $1 AND d.job_id = $2",
-    )
-    .bind(document_id)
-    .bind(job_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|err| internal_error(err.into()))?
-    .ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ApiError::new("未找到对应的输出文件。")),
-        )
-    })?;
-
-    if document.user_id != user.id && !user.is_admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiError::new("您无权下载该输出。")),
-        ));
-    }
-
-    let (path, suffix) = match variant.as_str() {
-        "summary" => document
-            .summary_path
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ApiError::new("摘要文件尚未生成。")),
-                )
-            })
-            .map(|path| (path, "summary"))?,
-        "translation" => document
-            .translation_path
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ApiError::new("译文文件尚未生成。")),
-                )
-            })
-            .map(|path| (path, "translation"))?,
-        _ => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiError::new("未知的下载类型。")),
-            ));
-        }
-    };
-
-    serve_file(Path::new(&path), &document.original_filename, suffix)
-        .await
-        .map_err(|err| internal_error(err.into()))
 }
 
 async fn download_combined_output(
@@ -828,14 +743,6 @@ fn append_to_file(path: &Path, heading: &str, body: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_text_file(path: &Path, content: &str, heading: &str) -> Result<()> {
-    let mut file =
-        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
-    writeln!(file, "# {}\n\n{}", heading, content)
-        .with_context(|| format!("failed to write summary file {}", path.display()))?;
-    Ok(())
-}
-
 fn format_heading(idx: usize, filename: &str) -> String {
     format!("Document {} — {}", idx + 1, filename)
 }
@@ -881,8 +788,6 @@ struct DocumentProcessingResult {
     success: bool,
     summary_text: Option<String>,
     translation_text: Option<String>,
-    summary_path: Option<String>,
-    translation_path: Option<String>,
     summary_tokens: i64,
     translation_tokens: i64,
     error_message: Option<String>,
@@ -892,7 +797,6 @@ struct DocumentProcessingResult {
 async fn process_single_document(
     state: AppState,
     job_id: Uuid,
-    job_dir: PathBuf,
     document: ProcessingDocumentRecord,
     idx: usize,
     document_kind: DocumentKind,
@@ -905,7 +809,6 @@ async fn process_single_document(
     let _permit = semaphore.acquire().await.expect("semaphore closed");
 
     let pool = state.pool();
-    let heading = format_heading(idx, &document.original_filename);
     let status_detail = format!("Reading {}", document.original_filename);
 
     let _ = update_document_status(
@@ -952,8 +855,6 @@ async fn process_single_document(
                 success: false,
                 summary_text: None,
                 translation_text: None,
-                summary_path: None,
-                translation_path: None,
                 summary_tokens: 0,
                 translation_tokens: 0,
                 error_message: Some(err.to_string()),
@@ -994,8 +895,6 @@ async fn process_single_document(
                 success: false,
                 summary_text: None,
                 translation_text: None,
-                summary_path: None,
-                translation_path: None,
                 summary_tokens: 0,
                 translation_tokens: 0,
                 error_message: Some(err.to_string()),
@@ -1007,37 +906,8 @@ async fn process_single_document(
     let summary_text = summary_response.text.trim().to_string();
     let summary_tokens = summary_response.token_usage.total_tokens as i64;
 
-    // Write summary file
-    let summary_file_path = job_dir.join(format!("summary_{}.txt", idx + 1));
-    if let Err(err) = tokio::task::spawn_blocking({
-        let path = summary_file_path.clone();
-        let content = summary_text.clone();
-        let heading = heading.clone();
-        move || create_text_file(&path, &content, &heading)
-    })
-    .await
-    .unwrap_or_else(|err| Err(anyhow!(err)))
-    {
-        error!(?err, document_id = %document.id, "failed to write summary file");
-        return DocumentProcessingResult {
-            document_id: document.id,
-            idx,
-            original_filename: document.original_filename,
-            success: false,
-            summary_text: Some(summary_text),
-            translation_text: None,
-            summary_path: None,
-            translation_path: None,
-            summary_tokens,
-            translation_tokens: 0,
-            error_message: Some(err.to_string()),
-            status_detail: Some("Failed to write summary file.".to_string()),
-        };
-    }
-
     // Handle translation if needed
     let mut translation_text = None;
-    let mut translation_path = None;
     let mut translation_tokens = 0_i64;
     let mut translation_status_detail = None;
     let mut translation_error = None;
@@ -1070,23 +940,7 @@ async fn process_single_document(
             Ok(response) => {
                 let text = response.text.trim().to_string();
                 translation_tokens = response.token_usage.total_tokens as i64;
-                let translation_file_path = job_dir.join(format!("translation_{}.txt", idx + 1));
-
-                if let Ok(_) = tokio::task::spawn_blocking({
-                    let path = translation_file_path.clone();
-                    let heading = heading.clone();
-                    let content = text.clone();
-                    move || create_text_file(&path, &content, &heading)
-                })
-                .await
-                .unwrap_or_else(|err| Err(anyhow!(err)))
-                {
-                    translation_path = Some(translation_file_path.to_string_lossy().to_string());
-                    translation_text = Some(text);
-                } else {
-                    translation_status_detail =
-                        Some("Translation file write failed; summary available.".to_string());
-                }
+                translation_text = Some(text);
             }
             Err(err) => {
                 error!(?err, document_id = %document.id, "translation request failed after retries");
@@ -1104,8 +958,6 @@ async fn process_single_document(
         success: true,
         summary_text: Some(summary_text),
         translation_text,
-        summary_path: Some(summary_file_path.to_string_lossy().to_string()),
-        translation_path,
         summary_tokens,
         translation_tokens,
         error_message: translation_error,
@@ -1169,7 +1021,6 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
 
     for (idx, document) in documents.into_iter().enumerate() {
         let state_clone = state.clone();
-        let job_dir_clone = job_dir.clone();
         let models_clone = models.clone();
         let prompts_clone = prompts.clone();
         let translation_prompt_clone = translation_prompt.clone();
@@ -1178,7 +1029,6 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
         let task = tokio::spawn(process_single_document(
             state_clone,
             job_id,
-            job_dir_clone,
             document,
             idx,
             document_kind,
@@ -1299,14 +1149,12 @@ async fn process_job(state: AppState, job_id: Uuid) -> Result<()> {
         }
 
         // Update database with results - propagate error on failure
-        if let Err(err) = sqlx::query("UPDATE summary_documents SET status = $2, status_detail = $3, summary_text = $4, translation_text = $5, summary_path = $6, translation_path = $7, summary_tokens = $8, translation_tokens = $9, error_message = $10, updated_at = NOW() WHERE id = $1")
+        if let Err(err) = sqlx::query("UPDATE summary_documents SET status = $2, status_detail = $3, summary_text = $4, translation_text = $5, summary_path = NULL, translation_path = NULL, summary_tokens = $6, translation_tokens = $7, error_message = $8, updated_at = NOW() WHERE id = $1")
             .bind(result.document_id)
             .bind(STATUS_COMPLETED)
             .bind(result.status_detail.as_deref())
             .bind(result.summary_text.as_ref())
             .bind(result.translation_text.as_ref())
-            .bind(result.summary_path.as_ref())
-            .bind(result.translation_path.as_ref())
             .bind(result.summary_tokens)
             .bind(result.translation_tokens)
             .bind(result.error_message.as_deref())
@@ -1486,17 +1334,7 @@ struct DocumentRecord {
     original_filename: String,
     status: String,
     status_detail: Option<String>,
-    summary_path: Option<String>,
-    translation_path: Option<String>,
     error_message: Option<String>,
-}
-
-#[derive(sqlx::FromRow)]
-struct DocumentDownloadRecord {
-    user_id: Uuid,
-    original_filename: String,
-    summary_path: Option<String>,
-    translation_path: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1526,8 +1364,6 @@ struct JobDocumentStatus {
     status: String,
     status_detail: Option<String>,
     error_message: Option<String>,
-    summary_download_url: Option<String>,
-    translation_download_url: Option<String>,
 }
 
 #[derive(sqlx::FromRow, Clone)]
