@@ -15,7 +15,6 @@ const ROBOTS_TXT_BODY: &str = include_str!("../../robots.txt");
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(landing::landing_page))
-        .route("/jobs", get(history::jobs_page))
         .route("/login", get(auth::login_page).post(auth::process_login))
         .route("/logout", post(auth::logout))
         .route("/robots.txt", get(robots_txt))

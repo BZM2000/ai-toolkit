@@ -2,7 +2,6 @@ use std::{collections::HashMap, time::Duration as StdDuration};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
 use sqlx::{PgPool, Row};
 use tracing::warn;
 use uuid::Uuid;
@@ -59,10 +58,6 @@ const MODULES: &[ModuleMetadata] = &[
         supports_downloads: true,
     },
 ];
-
-pub fn modules() -> &'static [ModuleMetadata] {
-    MODULES
-}
 
 pub fn module_metadata(key: &str) -> Option<&'static ModuleMetadata> {
     MODULES.iter().find(|meta| meta.key == key)
@@ -422,25 +417,4 @@ pub async fn purge_stale_history(pool: &PgPool) -> Result<u64> {
 
 pub fn retention_interval() -> StdDuration {
     StdDuration::from_secs((HISTORY_RETENTION_HOURS * 3600) as u64)
-}
-
-#[derive(Serialize)]
-pub struct ApiModuleDescriptor {
-    pub key: String,
-    pub label: String,
-    pub tool_path: String,
-    pub status_path_prefix: String,
-    pub supports_downloads: bool,
-}
-
-impl From<&ModuleMetadata> for ApiModuleDescriptor {
-    fn from(meta: &ModuleMetadata) -> Self {
-        Self {
-            key: meta.key.to_string(),
-            label: meta.label.to_string(),
-            tool_path: meta.tool_path.to_string(),
-            status_path_prefix: meta.status_path_prefix.to_string(),
-            supports_downloads: meta.supports_downloads,
-        }
-    }
 }

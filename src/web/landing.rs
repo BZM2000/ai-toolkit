@@ -76,11 +76,6 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
             "上传学术稿件，通过8个模型并行审稿，生成元审稿报告和事实核查。",
             "/tools/reviewer",
         ),
-        (
-            "任务历史（24 小时）",
-            "集中查看所有模块最近 24 小时内的任务进度与下载链接。",
-            "/jobs",
-        ),
     ];
 
     let module_cards = modules
