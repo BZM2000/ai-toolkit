@@ -41,7 +41,11 @@ use crate::{
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_SUMMARIZER},
-    web::auth::{self, JsonAuthError},
+    web::{
+        ApiMessage, JobSubmission,
+        auth::{self, JsonAuthError},
+        json_error,
+    },
 };
 
 const STORAGE_ROOT: &str = "storage/summarizer";
@@ -284,10 +288,10 @@ async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
     multipart: Multipart,
-) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<JobSubmission>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let mut document_type = DocumentKind::ResearchArticle;
     let mut translate = true;
@@ -313,9 +317,9 @@ async fn create_job(
         Ok(outcome) => outcome,
         Err(err) => {
             let _ = tokio_fs::remove_dir_all(&job_dir).await;
-            return Err((
+            return Err(json_error(
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new(err.message().to_string())),
+                err.message().to_string(),
             ));
         }
     };
@@ -336,7 +340,7 @@ async fn create_job(
         usage::ensure_within_limits(&pool, user.id, MODULE_SUMMARIZER, files.len() as i64).await
     {
         let _ = tokio_fs::remove_dir_all(&job_dir).await;
-        return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
+        return Err(json_error(StatusCode::FORBIDDEN, err.message()));
     }
 
     let mut transaction = pool
@@ -382,20 +386,20 @@ async fn create_job(
 
     spawn_job_worker(state.clone(), job_id);
 
-    Ok(Json(JobSubmissionResponse {
+    Ok(Json(JobSubmission::new(
         job_id,
-        status_url: format!("/api/summarizer/jobs/{}", job_id),
-    }))
+        format!("/api/summarizer/jobs/{}", job_id),
+    )))
 }
 
 async fn job_status(
     State(state): State<AppState>,
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
-) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
 
@@ -409,14 +413,14 @@ async fn job_status(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("未找到任务或任务已失效。")),
+            Json(ApiMessage::new("未找到任务或任务已失效。")),
         )
     })?;
 
     if job.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("您无权访问该任务。")),
+            Json(ApiMessage::new("您无权访问该任务。")),
         ));
     }
 
@@ -462,10 +466,10 @@ async fn download_combined_output(
     State(state): State<AppState>,
     jar: CookieJar,
     AxumPath((job_id, variant)): AxumPath<(Uuid, String)>,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
+) -> Result<Response, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
 
@@ -479,21 +483,21 @@ async fn download_combined_output(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("未找到任务。")),
+            Json(ApiMessage::new("未找到任务。")),
         )
     })?;
 
     if job.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("您无权访问该任务。")),
+            Json(ApiMessage::new("您无权访问该任务。")),
         ));
     }
 
     if job.files_purged_at.is_some() {
         return Err((
             StatusCode::GONE,
-            Json(ApiError::new("该任务的下载文件已过期并被清除。")),
+            Json(ApiMessage::new("该任务的下载文件已过期并被清除。")),
         ));
     }
 
@@ -503,7 +507,7 @@ async fn download_combined_output(
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(ApiError::new("汇总摘要尚不可用。")),
+                    Json(ApiMessage::new("汇总摘要尚不可用。")),
                 )
             })
             .map(|path| (path, "combined-summary"))?,
@@ -512,14 +516,14 @@ async fn download_combined_output(
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(ApiError::new("汇总译文尚不可用。")),
+                    Json(ApiMessage::new("汇总译文尚不可用。")),
                 )
             })
             .map(|path| (path, "combined-translation"))?,
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new("未知的下载类型。")),
+                Json(ApiMessage::new("未知的下载类型。")),
             ));
         }
     };
@@ -1284,25 +1288,6 @@ impl DocumentKind {
     }
 }
 
-#[derive(Serialize)]
-struct JobSubmissionResponse {
-    job_id: Uuid,
-    status_url: String,
-}
-
-#[derive(Serialize)]
-struct ApiError {
-    message: String,
-}
-
-impl ApiError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
 #[derive(sqlx::FromRow)]
 struct JobRecord {
     id: Uuid,
@@ -1370,11 +1355,11 @@ struct ProcessingDocumentRecord {
     source_path: String,
 }
 
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiMessage>) {
     error!(?err, "internal error in summarizer module");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError::new("服务器内部错误。")),
+        Json(ApiMessage::new("服务器内部错误。")),
     )
 }
 

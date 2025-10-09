@@ -39,7 +39,11 @@ use crate::{
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_TRANSLATE_DOCX},
-    web::auth::{self, JsonAuthError},
+    web::{
+        ApiMessage, JobSubmission,
+        auth::{self, JsonAuthError},
+        json_error,
+    },
 };
 
 const STORAGE_ROOT: &str = "storage/translatedocx";
@@ -332,10 +336,10 @@ async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
     multipart: Multipart,
-) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<JobSubmission>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
 
@@ -358,9 +362,9 @@ async fn create_job(
         Ok(outcome) => outcome,
         Err(err) => {
             let _ = tokio_fs::remove_dir_all(&job_dir).await;
-            return Err((
+            return Err(json_error(
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new(err.message().to_string())),
+                err.message().to_string(),
             ));
         }
     };
@@ -377,7 +381,7 @@ async fn create_job(
 
     if let Err(err) = usage::ensure_within_limits(&pool, user.id, MODULE_TRANSLATE_DOCX, 1).await {
         let _ = tokio_fs::remove_dir_all(&job_dir).await;
-        return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
+        return Err(json_error(StatusCode::FORBIDDEN, err.message()));
     }
 
     let mut transaction = pool
@@ -421,20 +425,20 @@ async fn create_job(
 
     spawn_job_worker(state.clone(), job_id);
 
-    Ok(Json(JobSubmissionResponse {
+    Ok(Json(JobSubmission::new(
         job_id,
-        status_url: format!("/api/translatedocx/jobs/{}", job_id),
-    }))
+        format!("/api/translatedocx/jobs/{}", job_id),
+    )))
 }
 
 async fn job_status(
     State(state): State<AppState>,
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
-) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
 
@@ -448,14 +452,14 @@ async fn job_status(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("未找到任务。")),
+            Json(ApiMessage::new("未找到任务。")),
         )
     })?;
 
     if job.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("您无权访问该任务。")),
+            Json(ApiMessage::new("您无权访问该任务。")),
         ));
     }
 
@@ -503,18 +507,18 @@ async fn download_document_output(
     State(state): State<AppState>,
     jar: CookieJar,
     AxumPath(params): AxumPath<(Uuid, Uuid, String)>,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
+) -> Result<Response, (StatusCode, Json<ApiMessage>)> {
     let (job_id, document_id, variant) = params;
     if variant != "translated" {
-        return Err((
+        return Err(json_error(
             StatusCode::BAD_REQUEST,
-            Json(ApiError::new("Unknown download variant.")),
+            "Unknown download variant.",
         ));
     }
 
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
     let document = sqlx::query_as::<_, DocumentDownloadRecord>(
@@ -525,33 +529,25 @@ async fn download_document_output(
     .fetch_optional(&pool)
     .await
     .map_err(|err| internal_error(err.into()))?
-    .ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ApiError::new("Document output not found.")),
-        )
-    })?;
+    .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "Document output not found."))?;
 
     if document.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("You do not have access to this output.")),
+            Json(ApiMessage::new("You do not have access to this output.")),
         ));
     }
 
     if document.files_purged_at.is_some() {
         return Err((
             StatusCode::GONE,
-            Json(ApiError::new("译文下载已过期并被清除。")),
+            Json(ApiMessage::new("译文下载已过期并被清除。")),
         ));
     }
 
-    let path = document.translated_path.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ApiError::new("译文文件尚未生成。")),
-        )
-    })?;
+    let path = document
+        .translated_path
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "译文文件尚未生成。"))?;
 
     serve_docx_file(Path::new(&path), &document.original_filename)
         .await
@@ -1281,25 +1277,6 @@ async fn ensure_storage_root() -> Result<()> {
         .with_context(|| format!("failed to ensure storage root at {}", STORAGE_ROOT))
 }
 
-#[derive(Debug, Serialize)]
-struct JobSubmissionResponse {
-    job_id: Uuid,
-    status_url: String,
-}
-
-#[derive(Serialize)]
-struct ApiError {
-    message: String,
-}
-
-impl ApiError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
 #[derive(sqlx::FromRow)]
 struct JobRecord {
     id: Uuid,
@@ -1366,11 +1343,11 @@ struct ProcessingDocumentRecord {
     source_path: String,
 }
 
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiMessage>) {
     error!(?err, "internal error in docx translator module");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError::new("服务器内部错误。")),
+        Json(ApiMessage::new("服务器内部错误。")),
     )
 }
 

@@ -11,9 +11,9 @@ use tracing::error;
 
 use crate::history;
 use crate::web::{
-    AppState,
+    ApiMessage, AppState,
     auth::{self, JsonAuthError},
-    history_ui,
+    history_ui, json_error,
 };
 use crate::{escape_html, render_footer};
 
@@ -23,19 +23,6 @@ pub struct HistoryQuery {
     module: Option<String>,
     #[serde(default)]
     limit: Option<i64>,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct ApiError {
-    message: String,
-}
-
-impl ApiError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
 }
 
 #[derive(serde::Serialize)]
@@ -65,17 +52,14 @@ pub async fn recent_history(
     State(state): State<AppState>,
     jar: CookieJar,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<HistoryResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<HistoryResponse>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     if let Some(ref module) = query.module {
         if history::module_metadata(module).is_none() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiError::new("未知模块标识。")),
-            ));
+            return Err(json_error(StatusCode::BAD_REQUEST, "未知模块标识。"));
         }
     }
 
@@ -86,9 +70,9 @@ pub async fn recent_history(
             .await
             .map_err(|err| {
                 error!(?err, user_id = %user.id, "failed to load history entries");
-                (
+                json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiError::new("无法读取历史记录，请稍后再试。")),
+                    "无法读取历史记录，请稍后再试。",
                 )
             })?;
 

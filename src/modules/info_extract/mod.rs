@@ -41,7 +41,11 @@ use crate::{
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_INFO_EXTRACT},
-    web::auth::{self, JsonAuthError},
+    web::{
+        ApiMessage, JobSubmission,
+        auth::{self, JsonAuthError},
+        json_error,
+    },
 };
 
 const STORAGE_ROOT: &str = "storage/infoextract";
@@ -73,25 +77,6 @@ pub fn router() -> Router<AppState> {
             "/dashboard/modules/infoextract/prompts",
             post(admin::save_prompts),
         )
-}
-
-#[derive(Serialize)]
-struct ApiError {
-    message: String,
-}
-
-impl ApiError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct JobSubmissionResponse {
-    job_id: Uuid,
-    status_url: String,
 }
 
 #[derive(Serialize)]
@@ -409,10 +394,10 @@ async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
     multipart: Multipart,
-) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<JobSubmission>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     ensure_storage_root()
         .await
@@ -443,9 +428,9 @@ async fn create_job(
         Ok(outcome) => outcome,
         Err(err) => {
             let _ = tokio_fs::remove_dir_all(&job_dir).await;
-            return Err((
+            return Err(json_error(
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new(err.message().to_string())),
+                err.message().to_string(),
             ));
         }
     };
@@ -453,17 +438,17 @@ async fn create_job(
     let documents: Vec<_> = upload.files_for("documents").cloned().collect();
     if documents.is_empty() {
         let _ = tokio_fs::remove_dir_all(&job_dir).await;
-        return Err((
+        return Err(json_error(
             StatusCode::BAD_REQUEST,
-            Json(ApiError::new("请至少上传一篇 PDF 论文。")),
+            "请至少上传一篇 PDF 论文。",
         ));
     }
 
     if documents.is_empty() {
         let _ = tokio_fs::remove_dir_all(&job_dir).await;
-        return Err((
+        return Err(json_error(
             StatusCode::BAD_REQUEST,
-            Json(ApiError::new("请至少上传一篇 PDF 论文。")),
+            "请至少上传一篇 PDF 论文。",
         ));
     }
 
@@ -471,9 +456,9 @@ async fn create_job(
         Some(file) => file,
         None => {
             let _ = tokio_fs::remove_dir_all(&job_dir).await;
-            return Err((
+            return Err(json_error(
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new("请上传字段定义表 XLSX。")),
+                "请上传字段定义表 XLSX。",
             ));
         }
     };
@@ -485,9 +470,9 @@ async fn create_job(
         Ok(fields) => fields,
         Err(err) => {
             let _ = tokio_fs::remove_dir_all(&job_dir).await;
-            return Err((
+            return Err(json_error(
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new(format!("字段定义表格式错误：{}", err))),
+                format!("字段定义表格式错误：{}", err),
             ));
         }
     };
@@ -499,7 +484,7 @@ async fn create_job(
             .await
     {
         let _ = tokio_fs::remove_dir_all(&job_dir).await;
-        return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
+        return Err(json_error(StatusCode::FORBIDDEN, err.message()));
     }
 
     let mut transaction = pool
@@ -549,20 +534,20 @@ async fn create_job(
 
     spawn_job_worker(state.clone(), job_id, fields);
 
-    Ok(Json(JobSubmissionResponse {
+    Ok(Json(JobSubmission::new(
         job_id,
-        status_url: format!("/api/infoextract/jobs/{}", job_id),
-    }))
+        format!("/api/infoextract/jobs/{}", job_id),
+    )))
 }
 
 async fn job_status(
     State(state): State<AppState>,
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
-) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
 
@@ -577,14 +562,14 @@ async fn job_status(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("未找到任务或任务已过期。")),
+            Json(ApiMessage::new("未找到任务或任务已过期。")),
         )
     })?;
 
     if job.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("您无权访问该任务。")),
+            Json(ApiMessage::new("您无权访问该任务。")),
         ));
     }
 
@@ -628,10 +613,10 @@ async fn download_result(
     State(state): State<AppState>,
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
     let record = sqlx::query_as::<_, DownloadRecord>(
@@ -644,28 +629,28 @@ async fn download_result(
     .ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("未找到任务或暂无可下载结果。")),
+            Json(ApiMessage::new("未找到任务或暂无可下载结果。")),
         )
     })?;
 
     if record.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("您无权下载该任务的结果。")),
+            Json(ApiMessage::new("您无权下载该任务的结果。")),
         ));
     }
 
     if record.files_purged_at.is_some() {
         return Err((
             StatusCode::GONE,
-            Json(ApiError::new("结果文件已过期并被清除。")),
+            Json(ApiMessage::new("结果文件已过期并被清除。")),
         ));
     }
 
     let result_path = record.result_path.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
-            Json(ApiError::new("任务尚未生成结果。")),
+            Json(ApiMessage::new("任务尚未生成结果。")),
         )
     })?;
 
@@ -1351,11 +1336,11 @@ fn generate_result_workbook(
     Ok(())
 }
 
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiMessage>) {
     error!(?err, "信息提取模块内部错误");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError::new("服务器内部错误，请稍后再试。")),
+        Json(ApiMessage::new("服务器内部错误，请稍后再试。")),
     )
 }
 

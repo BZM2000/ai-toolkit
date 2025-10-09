@@ -6,6 +6,7 @@ pub mod history;
 pub mod history_ui;
 pub mod landing;
 pub mod models;
+pub mod responses;
 pub mod router;
 pub mod state;
 pub mod templates;
@@ -18,6 +19,7 @@ pub use data::{
     fetch_journal_topics,
 };
 pub use models::{GlossaryTermRow, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow};
+pub use responses::{ApiMessage, JobSubmission, json_error};
 pub use state::AppState;
 pub use templates::{
     ToolAdminLink, ToolPageLayout, escape_html, render_footer, render_login_page, render_tool_page,

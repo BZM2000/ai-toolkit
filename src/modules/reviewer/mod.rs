@@ -35,7 +35,10 @@ use crate::{
     render_footer,
     usage::{self, MODULE_REVIEWER},
     utils::docx_to_pdf::convert_docx_to_pdf,
-    web::auth::{self, JsonAuthError},
+    web::{
+        auth::{self, JsonAuthError},
+        json_error,
+    },
 };
 
 const STORAGE_ROOT: &str = "storage/reviewer";
@@ -46,6 +49,10 @@ const STATUS_FAILED: &str = "failed";
 
 const ROUND1_RETRIES: usize = 3;
 const ROUND1_MIN_SUCCESSES: usize = 4;
+
+fn json_response(status: StatusCode, message: impl Into<String>) -> Response {
+    json_error(status, message).into_response()
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -318,13 +325,11 @@ async fn create_job(
 ) -> Result<Json<serde_json::Value>, Response> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| {
-            (status, Json(json!({ "message": message }))).into_response()
-        })?;
+        .map_err(|JsonAuthError { status, message }| json_response(status, message))?;
 
     if let Err(e) = usage::ensure_within_limits(state.pool_ref(), user.id, MODULE_REVIEWER, 1).await
     {
-        return Err((StatusCode::TOO_MANY_REQUESTS, e.message()).into_response());
+        return Err(json_response(StatusCode::TOO_MANY_REQUESTS, e.message()));
     }
 
     let temp_dir = PathBuf::from(STORAGE_ROOT).join(format!("tmp_{}", Uuid::new_v4()));
@@ -342,7 +347,10 @@ async fn create_job(
         Ok(outcome) => outcome,
         Err(err) => {
             let _ = tokio_fs::remove_dir_all(&temp_dir).await;
-            return Err((StatusCode::BAD_REQUEST, err.message().to_string()).into_response());
+            return Err(json_response(
+                StatusCode::BAD_REQUEST,
+                err.message().to_string(),
+            ));
         }
     };
 
@@ -353,14 +361,14 @@ async fn create_job(
 
     if language != "english" && language != "chinese" {
         let _ = tokio_fs::remove_dir_all(&temp_dir).await;
-        return Err((StatusCode::BAD_REQUEST, "Invalid language").into_response());
+        return Err(json_response(StatusCode::BAD_REQUEST, "Invalid language"));
     }
 
     let file = match upload.first_file_for("file").cloned() {
         Some(file) => file,
         None => {
             let _ = tokio_fs::remove_dir_all(&temp_dir).await;
-            return Err((StatusCode::BAD_REQUEST, "No file provided").into_response());
+            return Err(json_response(StatusCode::BAD_REQUEST, "No file provided"));
         }
     };
 
@@ -372,11 +380,10 @@ async fn create_job(
         .to_lowercase();
     if ext != "pdf" && ext != "docx" {
         let _ = tokio_fs::remove_dir_all(&temp_dir).await;
-        return Err((
+        return Err(json_response(
             StatusCode::BAD_REQUEST,
             "Only PDF and DOCX files are accepted",
-        )
-            .into_response());
+        ));
     }
 
     let job_id: i32 = match sqlx::query_scalar(
@@ -394,7 +401,10 @@ async fn create_job(
         Err(e) => {
             let _ = tokio_fs::remove_dir_all(&temp_dir).await;
             error!("Failed to create job: {e}");
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to create job").into_response());
+            return Err(json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create job",
+            ));
         }
     };
 
@@ -402,18 +412,20 @@ async fn create_job(
     if let Err(e) = tokio_fs::create_dir_all(&final_dir).await {
         let _ = tokio_fs::remove_dir_all(&temp_dir).await;
         error!("Failed to create job directory: {e}");
-        return Err((
+        return Err(json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to create job directory",
-        )
-            .into_response());
+        ));
     }
 
     let manuscript_path = final_dir.join(&file.stored_name);
     if let Err(e) = tokio_fs::rename(&file.stored_path, &manuscript_path).await {
         let _ = tokio_fs::remove_dir_all(&temp_dir).await;
         error!("Failed to persist manuscript: {e}");
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file").into_response());
+        return Err(json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to save file",
+        ));
     }
     let _ = tokio_fs::remove_dir_all(&temp_dir).await;
 
@@ -484,16 +496,16 @@ async fn job_status(
     .await
     .map_err(|e| {
         error!("Database error: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        json_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?
-    .ok_or_else(|| (StatusCode::NOT_FOUND, "Job not found").into_response())?;
+    .ok_or_else(|| json_response(StatusCode::NOT_FOUND, "Job not found"))?;
 
     if job.user_id != user.id && !user.is_admin {
-        return Err((StatusCode::FORBIDDEN, "Access denied").into_response());
+        return Err(json_response(StatusCode::FORBIDDEN, "Access denied"));
     }
 
     if job.files_purged_at.is_some() {
-        return Err((StatusCode::GONE, "审稿文件已过期并被清除。").into_response());
+        return Err(json_response(StatusCode::GONE, "审稿文件已过期并被清除。"));
     }
 
     // Fetch review documents
@@ -515,7 +527,7 @@ async fn job_status(
     .await
     .map_err(|e| {
         error!("Database error: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        json_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?;
 
     let mut round1_reviews = Vec::new();
@@ -617,16 +629,16 @@ async fn download_review(
     .await
     .map_err(|e| {
         error!("Database error: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        json_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?
-    .ok_or_else(|| (StatusCode::NOT_FOUND, "Job not found").into_response())?;
+    .ok_or_else(|| json_response(StatusCode::NOT_FOUND, "Job not found"))?;
 
     if job.user_id != user.id && !user.is_admin {
-        return Err((StatusCode::FORBIDDEN, "Access denied").into_response());
+        return Err(json_response(StatusCode::FORBIDDEN, "Access denied"));
     }
 
     if job.files_purged_at.is_some() {
-        return Err((StatusCode::GONE, "审稿文件已过期并被清除。").into_response());
+        return Err(json_response(StatusCode::GONE, "审稿文件已过期并被清除。"));
     }
 
     #[derive(sqlx::FromRow)]
@@ -645,13 +657,13 @@ async fn download_review(
     .await
     .map_err(|e| {
         error!("Database error: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        json_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
     })?
-    .ok_or_else(|| (StatusCode::NOT_FOUND, "Review not found").into_response())?;
+    .ok_or_else(|| json_response(StatusCode::NOT_FOUND, "Review not found"))?;
 
     let file_path = doc
         .file_path
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "File not available").into_response())?;
+        .ok_or_else(|| json_response(StatusCode::NOT_FOUND, "File not available"))?;
 
     let path_buf = PathBuf::from(&file_path);
     let filename = path_buf
@@ -661,7 +673,7 @@ async fn download_review(
 
     let bytes = tokio_fs::read(&file_path).await.map_err(|e| {
         error!("Failed to read file {file_path}: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response()
+        json_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file")
     })?;
 
     Ok((

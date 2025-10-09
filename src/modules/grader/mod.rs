@@ -40,7 +40,11 @@ use crate::{
     llm::{ChatMessage, LlmClient, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_GRADER},
-    web::auth::{self, JsonAuthError},
+    web::{
+        ApiMessage, JobSubmission,
+        auth::{self, JsonAuthError},
+        json_error,
+    },
 };
 
 const STORAGE_ROOT: &str = "storage/grader";
@@ -114,25 +118,6 @@ struct JobDocumentStatusRow {
     original_filename: String,
     status: String,
     status_detail: Option<String>,
-}
-
-#[derive(Serialize)]
-struct JobSubmissionResponse {
-    job_id: Uuid,
-    status_url: String,
-}
-
-#[derive(Serialize)]
-struct ApiError {
-    message: String,
-}
-
-impl ApiError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -461,15 +446,15 @@ async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
     multipart: Multipart,
-) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<JobSubmission>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
 
     if let Err(err) = usage::ensure_within_limits(&pool, user.id, MODULE_GRADER, 1).await {
-        return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
+        return Err(json_error(StatusCode::FORBIDDEN, err.message()));
     }
 
     ensure_storage_root()
@@ -492,9 +477,9 @@ async fn create_job(
         Ok(outcome) => outcome,
         Err(err) => {
             let _ = tokio_fs::remove_dir_all(&job_dir).await;
-            return Err((
+            return Err(json_error(
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new(err.message().to_string())),
+                err.message().to_string(),
             ));
         }
     };
@@ -550,20 +535,20 @@ async fn create_job(
 
     spawn_job_worker(state.clone(), job_id);
 
-    Ok(Json(JobSubmissionResponse {
+    Ok(Json(JobSubmission::new(
         job_id,
-        status_url: format!("/api/grader/jobs/{}", job_id),
-    }))
+        format!("/api/grader/jobs/{}", job_id),
+    )))
 }
 
 async fn job_status(
     State(state): State<AppState>,
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
-) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiMessage>)> {
     let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
+        .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
 
@@ -574,12 +559,12 @@ async fn job_status(
     .fetch_optional(&pool)
     .await
     .map_err(|err| internal_error(err.into()))?
-    .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiError::new("未找到任务。"))))?;
+    .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "未找到任务。"))?;
 
     if job.user_id != user.id && !user.is_admin {
         return Err((
             StatusCode::FORBIDDEN,
-            Json(ApiError::new("无权查看该任务。")),
+            Json(ApiMessage::new("无权查看该任务。")),
         ));
     }
 
@@ -1359,11 +1344,11 @@ fn extract_docx_text(path: &Path) -> Result<String> {
     Ok(output.trim().to_string())
 }
 
-fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiMessage>) {
     error!(?err, "internal error in grader module");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError::new("服务器内部错误。")),
+        Json(ApiMessage::new("服务器内部错误。")),
     )
 }
 

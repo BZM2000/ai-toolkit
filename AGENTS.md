@@ -121,8 +121,14 @@
 - `maintenance::spawn` enforces the 24-hour retention policy by clearing generated files under `storage/*` and nulling persisted download paths; download handlers return HTTP `410 Gone` once resources expire.
 - The retention schema adds `files_purged_at` to module job tables so history surfaces can distinguish expired outputs.
 
+### Response Helpers
+- `src/web/responses.rs` defines the canonical `ApiMessage` payload, a shared `JobSubmission` struct, and `json_error` for emitting `(StatusCode, Json<ApiMessage>)` pairs.
+- `web::mod` re-exports these helpers so tool modules can return consistent error bodies and job submission responses without bespoke structs.
+- JSON endpoints should prefer `json_error` (or wrappers like `json_response` in reviewer) to keep error copy aligned and simplify future localisation.
+
 ## Building a New Tool Module
 1. **Module skeleton**: create `src/modules/<tool>/mod.rs` with a `Router<AppState>` exposing `/tools/<tool>` and `/api/<tool>` endpoints. Use `auth::require_user_redirect` for HTML handlers and `auth::current_user_or_json_error` (or `current_user`) inside API routes to enforce sessions consistently.
+   - Return JSON errors via `json_error` (or module-specific wrappers) and reuse `JobSubmission::new` for async job acknowledgements.
 2. **Shared page layout**: render the `/tools/<tool>` handler with `render_tool_page(ToolPageLayout { .. })` so the module inherits the standard header/back link/tab shell. Supply your new-task markup via `new_tab_html`, embed `history_ui::render_history_panel(MODULE_<TOOL>)` in `history_panel_html`, and append scripts/CSS through `body_scripts`/`extra_style_blocks` (wrap custom JS in `<script>...</script>`).
 3. **State/utilities**: use helpers from `AppState` (`state.pool()`/`state.llm_client()`) and shared usage accounting (`crate::usage`). Place module-specific SQL tables/migrations under `migrations/` with incremental numbering—include a `files_purged_at TIMESTAMPTZ` column on your job table for retention bookkeeping.
 4. **Configuration**: extend `ModuleSettings` in `src/config.rs` if the tool needs persisted model/prompt data. Seed defaults in `ensure_defaults`, update admin forms, and persist edits via new DB columns.
@@ -210,7 +216,7 @@
 
 ## Centralisation Masterplan
 - **Unified auth/session helpers**: expose shared `require_user` variants from `web::auth` so modules depend on a single guard implementation (HTML redirect + JSON error adapters) instead of duplicating SQL session checks and `SessionUser` structs.
-- **Shared API response scaffolding**: create `web::responses` with reusable `ApiError`, `JobSubmissionResponse`, and `internal_error` helpers to eliminate per-module clones and align error copy.
+- **Shared API response scaffolding** ✅ `web::responses` now provides `ApiMessage`, `JobSubmission`, and `json_error` used across modules for consistent errors and submissions.
 - **Consistent job status modeling**: define a core `JobStatus` enum + serde helpers and bundle a shared front-end label map, keeping Axum responses and UI tags in sync across modules and the history panel.
 - **Storage & download utilities**: extract `storage::ensure_root` and `download_guard` helpers that encapsulate directory creation, ownership checks, and `files_purged_at` handling before streaming outputs.
 - **Job poller client kit**: publish a shared JS initializer (e.g., `window.initJobForm`) that wraps FormData submission, status messaging, and polling intervals so each tool only supplies render callbacks.
@@ -281,3 +287,4 @@
   - 各模块作业创建后统一记录历史，成功/失败队列与下载端点均反映清理状态，确保 24 小时后自动失效。
 - 2025-10-11 (Codex agent): 统一工具页布局，新增 `ToolPageLayout`/`render_tool_page` 并迁移五个模块以复用共享 header/标签页壳，更新新模块指南与文档说明，`cargo check` 通过。
 - 2025-10-11 (Codex agent): Centralised session guards via `web::auth::{current_user, require_user_redirect, current_user_or_json_error}`; removed per-module `SessionUser` structs and aligned history/api handlers to the shared helpers, `cargo fmt` + `cargo check` clean.
+- 2025-10-11 (Codex agent): Introduced shared response helpers (`web::responses::{ApiMessage, JobSubmission, json_error}`), migrated four async modules plus history/reviewer to reuse them, and refreshed docs/tests with `cargo fmt` + `cargo check`.
