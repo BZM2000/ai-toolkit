@@ -48,12 +48,12 @@ pub async fn dashboard(
         return Err(Redirect::to("/login"));
     }
 
-    let mut group_lookup: HashMap<Uuid, HashMap<String, GroupLimitDisplay>> = HashMap::new();
+    let mut group_lookup: HashMap<Uuid, UsageGroupDisplay> = HashMap::new();
     let mut group_options_for_create = String::new();
     let mut group_options_for_assign = String::new();
 
     for (idx, group) in groups.iter().enumerate() {
-        group_lookup.insert(group.id, group.limits.clone());
+        group_lookup.insert(group.id, group.clone());
         let option = format!(
             r#"<option value="{value}"{selected}>{label}</option>"#,
             value = escape_html(&group.id.to_string()),
@@ -85,33 +85,44 @@ pub async fn dashboard(
                 ""
             };
 
-            let usage_entries = usage_map.get(&user.id);
-            let limit_entries = group_lookup.get(&user.usage_group_id);
+            let usage_entry = usage_map.get(&user.id);
+            let group_info = group_lookup.get(&user.usage_group_id);
 
             let mut chips = String::new();
             let mut total_units = 0;
-            let mut total_tokens = 0;
+            let global_tokens = usage_entry.map(|entry| entry.global_tokens).unwrap_or(0);
+
+            let global_token_text = match group_info.and_then(|info| info.token_limit) {
+                Some(limit) => format!("{global_tokens}/{limit} 令牌"),
+                None => format!("{global_tokens} 令牌"),
+            };
+
+            chips.push_str(&format!(
+                r#"<div class="usage-chip"><span class="chip-title">全部模块</span><span>令牌合计</span><span>{tokens}</span></div>"#,
+                tokens = escape_html(&global_token_text),
+            ));
+
             for descriptor in usage::REGISTERED_MODULES {
-                let usage_snapshot = usage_entries.and_then(|map| map.get(descriptor.key));
-                let units_used = usage_snapshot.map(|s| s.units).unwrap_or(0);
-                let tokens_used = usage_snapshot.map(|s| s.tokens).unwrap_or(0);
+                let module_usage = usage_entry.and_then(|entry| entry.modules.get(descriptor.key));
+                let units_used = module_usage.map(|usage| usage.units).unwrap_or(0);
+                let tokens_used = module_usage.map(|usage| usage.tokens).unwrap_or(0);
 
                 total_units += units_used;
-                total_tokens += tokens_used;
 
-                let limit_snapshot = limit_entries.and_then(|map| map.get(descriptor.key));
+                let unit_limit = group_info
+                    .and_then(|info| info.unit_limits.get(descriptor.key))
+                    .copied()
+                    .flatten();
 
-                let unit_text = match limit_snapshot.and_then(|l| l.unit_limit) {
+                let unit_text = match unit_limit {
                     Some(limit) => format!(
                         "{units_used}/{limit} {label}",
                         label = descriptor.unit_label
                     ),
                     None => format!("{units_used} {label}", label = descriptor.unit_label),
                 };
-                let token_text = match limit_snapshot.and_then(|l| l.token_limit) {
-                    Some(limit) => format!("{tokens_used}/{limit} 令牌"),
-                    None => format!("{tokens_used} 令牌"),
-                };
+
+                let token_text = format!("{tokens_used} 令牌");
 
                 chips.push_str(&format!(
                     r#"<div class="usage-chip"><span class="chip-title">{title}</span><span>{unit}</span><span>{tokens}</span></div>"#,
@@ -122,7 +133,10 @@ pub async fn dashboard(
             }
 
             let usage_detail_html = format!(r#"<div class="usage-grid">{chips}</div>"#);
-            let usage_summary = format!("{total_units} 项 · {total_tokens} 令牌");
+            let usage_summary = format!(
+                "{total_units} 项 · {token_text}",
+                token_text = global_token_text,
+            );
 
             let mut group_select = format!(
                 r#"<form method="post" action="/dashboard/users/group" class="inline-form" onsubmit="return confirm('确认更改 {} 的额度组？');">"#,
@@ -209,30 +223,37 @@ pub async fn dashboard(
     let mut group_sections = String::from(r#"<h2 class="section-title">管理额度组</h2>"#);
     for group in &groups {
         let mut module_fields = String::new();
+
+        let token_attr = group
+            .token_limit
+            .map(|v| format!(r#" value="{}""#, v))
+            .unwrap_or_default();
+
+        module_fields.push_str(&format!(
+            r#"<div class="field-set">
+        <h3>全部模块</h3>
+        <div class="field">
+            <label for="tokens-global-{id}">令牌上限（近 7 日，全部模块共享）</label>
+            <input type="number" id="tokens-global-{id}" name="tokens_global"{token_attr} placeholder="留空表示不限" min="0">
+        </div>
+    </div>"#,
+            id = group.id,
+            token_attr = token_attr,
+        ));
+
         for descriptor in usage::REGISTERED_MODULES {
-            let limit = group.limits.get(descriptor.key);
-            let units_value = limit.and_then(|l| l.unit_limit);
-            let tokens_value = limit.and_then(|l| l.token_limit);
+            let units_value = group.unit_limits.get(descriptor.key).copied().flatten();
 
             let units_attr = units_value
-                .map(|v| format!(r#" value="{}""#, v))
-                .unwrap_or_default();
-            let tokens_attr = tokens_value
                 .map(|v| format!(r#" value="{}""#, v))
                 .unwrap_or_default();
 
             module_fields.push_str(&format!(
                 r#"<div class="field-set">
         <h3>{title}</h3>
-        <div class="dual-inputs">
-            <div class="field">
-                <label for="units-{key}-{id}">{unit_label}（近 7 日）</label>
-                <input type="number" id="units-{key}-{id}" name="units_{key}"{units_attr} placeholder="留空表示不限" min="0">
-            </div>
-            <div class="field">
-                <label for="tokens-{key}-{id}">令牌上限（近 7 日）</label>
-                <input type="number" id="tokens-{key}-{id}" name="tokens_{key}"{tokens_attr} placeholder="留空表示不限" min="0">
-            </div>
+        <div class="field">
+            <label for="units-{key}-{id}">{unit_label}（近 7 日）</label>
+            <input type="number" id="units-{key}-{id}" name="units_{key}"{units_attr} placeholder="留空表示不限" min="0">
         </div>
     </div>"#,
                 title = escape_html(descriptor.label),
@@ -240,7 +261,6 @@ pub async fn dashboard(
                 id = group.id,
                 unit_label = descriptor.unit_label,
                 units_attr = units_attr,
-                tokens_attr = tokens_attr,
             ));
         }
 
@@ -292,19 +312,23 @@ pub async fn dashboard(
     }
 
     let mut new_group_fields = String::new();
+    new_group_fields.push_str(
+        r#"<div class="field-set">
+        <h3>全部模块</h3>
+        <div class="field">
+            <label for="new-tokens-global">令牌上限（近 7 日，全部模块共享）</label>
+            <input type="number" id="new-tokens-global" name="tokens_global" placeholder="留空表示不限" min="0">
+        </div>
+    </div>"#,
+    );
+
     for descriptor in usage::REGISTERED_MODULES {
         new_group_fields.push_str(&format!(
             r#"<div class="field-set">
         <h3>{title}</h3>
-        <div class="dual-inputs">
-            <div class="field">
-                <label for="new-units-{key}">{unit_label}（近 7 日）</label>
-                <input type="number" id="new-units-{key}" name="units_{key}" placeholder="留空表示不限" min="0">
-            </div>
-            <div class="field">
-                <label for="new-tokens-{key}">令牌上限（近 7 日）</label>
-                <input type="number" id="new-tokens-{key}" name="tokens_{key}" placeholder="留空表示不限" min="0">
-            </div>
+        <div class="field">
+            <label for="new-units-{key}">{unit_label}（近 7 日）</label>
+            <input type="number" id="new-units-{key}" name="units_{key}" placeholder="留空表示不限" min="0">
         </div>
     </div>"#,
             title = escape_html(descriptor.label),
@@ -651,7 +675,8 @@ struct UsageGroupDisplay {
     id: Uuid,
     name: String,
     description: Option<String>,
-    limits: HashMap<String, GroupLimitDisplay>,
+    token_limit: Option<i64>,
+    unit_limits: HashMap<String, Option<i64>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -659,12 +684,6 @@ struct UsageGroupRow {
     id: Uuid,
     name: String,
     description: Option<String>,
-}
-
-#[derive(Clone)]
-struct GroupLimitDisplay {
-    token_limit: Option<i64>,
-    unit_limit: Option<i64>,
 }
 
 async fn fetch_dashboard_users(pool: &PgPool) -> sqlx::Result<Vec<DashboardUserRow>> {
@@ -688,27 +707,27 @@ async fn fetch_usage_groups_with_limits(pool: &PgPool) -> Result<Vec<UsageGroupD
     let displays = groups
         .into_iter()
         .map(|group| {
-            let limits = limit_map
+            let token_limit = limit_map
                 .get(&group.id)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(module, snapshot)| {
-                    (
-                        module,
-                        GroupLimitDisplay {
-                            token_limit: snapshot.token_limit,
-                            unit_limit: snapshot.unit_limit,
-                        },
-                    )
+                .and_then(|limits| limits.token_limit);
+
+            let unit_limits = limit_map
+                .get(&group.id)
+                .map(|limits| {
+                    limits
+                        .module_limits
+                        .iter()
+                        .map(|(module, snapshot)| (module.clone(), snapshot.unit_limit))
+                        .collect::<HashMap<_, _>>()
                 })
-                .collect();
+                .unwrap_or_default();
 
             UsageGroupDisplay {
                 id: group.id,
                 name: group.name,
                 description: group.description,
-                limits,
+                token_limit,
+                unit_limits,
             }
         })
         .collect();

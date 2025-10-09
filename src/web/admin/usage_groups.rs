@@ -42,23 +42,23 @@ pub async fn save_usage_group(
         (Uuid::new_v4(), false)
     };
 
-    let mut allocations: HashMap<String, (Option<i64>, Option<i64>)> = HashMap::new();
+    let global_token_limit =
+        match usage::parse_optional_limit(form.get("tokens_global").map(String::as_str)) {
+            Ok(value) => value,
+            Err(_) => return Ok(Redirect::to("/dashboard?error=group_invalid_limit")),
+        };
+
+    let mut unit_allocations: HashMap<String, Option<i64>> = HashMap::new();
     for module in usage::REGISTERED_MODULES {
         let unit_key = format!("units_{}", module.key);
-        let token_key = format!("tokens_{}", module.key);
 
         let unit_limit = match usage::parse_optional_limit(form.get(&unit_key).map(String::as_str))
         {
             Ok(value) => value,
             Err(_) => return Ok(Redirect::to("/dashboard?error=group_invalid_limit")),
         };
-        let token_limit =
-            match usage::parse_optional_limit(form.get(&token_key).map(String::as_str)) {
-                Ok(value) => value,
-                Err(_) => return Ok(Redirect::to("/dashboard?error=group_invalid_limit")),
-            };
 
-        allocations.insert(module.key.to_string(), (token_limit, unit_limit));
+        unit_allocations.insert(module.key.to_string(), unit_limit);
     }
 
     if existing {
@@ -101,7 +101,14 @@ pub async fn save_usage_group(
         }
     }
 
-    if let Err(err) = usage::upsert_group_limits(state.pool_ref(), group_id, &allocations).await {
+    if let Err(err) = usage::upsert_group_limits(
+        state.pool_ref(),
+        group_id,
+        global_token_limit,
+        &unit_allocations,
+    )
+    .await
+    {
         error!(?err, "failed to update usage group limits");
         return Ok(Redirect::to("/dashboard?error=unknown"));
     }
