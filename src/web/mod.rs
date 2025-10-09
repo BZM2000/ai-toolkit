@@ -19,7 +19,9 @@ pub use data::{
 };
 pub use models::{GlossaryTermRow, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow};
 pub use state::AppState;
-pub use templates::{escape_html, render_footer, render_login_page};
+pub use templates::{
+    ToolAdminLink, ToolPageLayout, escape_html, render_footer, render_login_page, render_tool_page,
+};
 #[allow(unused_imports)]
 pub use upload_ui::{
     UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig, render_upload_widget,

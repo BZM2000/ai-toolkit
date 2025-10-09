@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs,
     path::{Path, PathBuf},
 };
@@ -24,8 +25,9 @@ mod admin;
 
 use crate::web::history_ui;
 use crate::web::{
-    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
-    process_upload_form, render_upload_widget,
+    FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
+    UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
+    render_upload_widget,
 };
 use crate::{
     AppState, SESSION_COOKIE, escape_html, history,
@@ -131,100 +133,27 @@ async fn reviewer_page(
 ) -> Result<Html<String>, Response> {
     let user = require_user(&state, &jar).await?;
 
-    let footer = render_footer();
     let username = escape_html(&user.username);
-    let admin_link = if user.is_admin {
-        r#"<a class="admin-link" href="/dashboard/modules/reviewer">模块管理</a>"#.to_string()
-    } else {
-        String::new()
-    };
-    let upload_styles = UPLOAD_WIDGET_STYLES;
-    let upload_widget = render_upload_widget(
-        &UploadWidgetConfig::new(
-            "reviewer-upload",
-            "reviewer-file",
-            "file",
-            "上传稿件（PDF 或 DOCX）",
-        )
-        .with_description("系统会自动完成三轮审稿流程。")
-        .with_accept(".pdf,.docx"),
+    let note_html = format!(
+        "当前登录：<strong>{username}</strong>。上传稿件后，系统将自动执行三轮审稿，生成可下载的 DOCX 报告。",
+        username = username,
     );
-    let upload_script = UPLOAD_WIDGET_SCRIPT;
-    let history_styles = history_ui::HISTORY_STYLES;
+    let admin_link = if user.is_admin {
+        Some(ToolAdminLink {
+            href: "/dashboard/modules/reviewer",
+            label: "模块管理",
+        })
+    } else {
+        None
+    };
+    let upload_widget = render_upload_widget(
+        &UploadWidgetConfig::new("reviewer-upload", "reviewer-file", "file", "稿件文件")
+            .with_description("支持上传 PDF 或 DOCX。DOCX 将自动转换为 PDF 参与审稿。")
+            .with_accept(".pdf,.docx"),
+    );
     let history_panel = history_ui::render_history_panel(MODULE_REVIEWER);
-    let history_script = history_ui::HISTORY_SCRIPT;
-
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>审稿助手 | Zhang Group AI Toolkit</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="robots" content="noindex,nofollow">
-    <style>
-        :root {{ color-scheme: light; }}
-        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
-        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
-        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
-        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
-        .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
-        .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
-        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
-        section {{ margin-bottom: 2.5rem; }}
-        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
-        .panel h2 {{ margin-top: 0; }}
-        label {{ display: block; margin: 0.5rem 0 0.35rem; font-weight: 600; color: #0f172a; }}
-        select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
-        select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
-        button:hover {{ background: #1d4ed8; }}
-        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
-        .note {{ color: #475569; font-size: 0.95rem; }}
-        .status-box {{ margin-top: 1.5rem; font-size: 0.95rem; color: #2563eb; }}
-        .status-box.error {{ color: #b91c1c; }}
-        .status-box.success {{ color: #166534; }}
-        .reviews {{ display: grid; gap: 1rem; margin-top: 1.5rem; }}
-        .review-card {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.25rem; box-shadow: 0 12px 30px rgba(15,23,42,0.06); }}
-        .review-card h3 {{ margin-top: 0; font-size: 1rem; }}
-        .status-tag {{ display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }}
-        .status-tag.pending {{ background: #fef3c7; color: #92400e; }}
-        .status-tag.processing {{ background: #e0f2fe; color: #1d4ed8; }}
-        .status-tag.completed {{ background: #dcfce7; color: #166534; }}
-        .status-tag.failed {{ background: #fee2e2; color: #b91c1c; }}
-        .downloads a {{ color: #2563eb; text-decoration: none; font-weight: 600; }}
-        .downloads a:hover {{ text-decoration: underline; }}
-        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
-        {history_styles}
-        @media (max-width: 768px) {{
-            header {{ padding: 1.5rem 1rem; }}
-            main {{ padding: 1.5rem 1rem; }}
-            .header-bar {{ flex-direction: column; align-items: flex-start; }}
-            .reviews {{ grid-template-columns: 1fr; }}
-        }}
-        {upload_styles}
-    </style>
-</head>
-<body>
-    <header>
-        <div class="header-bar">
-            <h1>审稿助手</h1>
-            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
-                <a class="back-link" href="/">← 返回首页</a>
-                {admin_link}
-            </div>
-        </div>
-        <p class="note">当前登录：<strong>{username}</strong>。上传稿件后，系统将自动执行三轮审稿，生成可下载的 DOCX 报告。</p>
-    </header>
-    <main>
-        <div class="tool-tabs" data-tab-group="reviewer">
-            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
-            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
-        </div>
-        <div class="tab-container" data-tab-container="reviewer">
-            <div class="tab-section active" data-tab-panel="new">
-                <section class="panel">
+    let new_tab_html = format!(
+        r#"                <section class="panel">
                     <h2>提交稿件</h2>
                     <form id="reviewer-form">
                         {upload_widget}
@@ -241,160 +170,173 @@ async fn reviewer_page(
                     <h2>任务进度</h2>
                     <div id="job-status"></div>
                 </section>
-            </div>
-            <div class="tab-section" data-tab-panel="history">
-                {history_panel}
-            </div>
-        </div>
-        {footer}
-    </main>
-    {upload_script}
-    <script>
-        const form = document.getElementById('reviewer-form');
-        const statusBox = document.getElementById('submission-status');
-        const jobStatus = document.getElementById('job-status');
-        const fileInput = document.getElementById('reviewer-file');
-        const languageSelect = document.getElementById('language');
-        let pollTimer = null;
-
-        const setStatus = (message, type = null) => {{
-            statusBox.textContent = message;
-            statusBox.classList.remove('error', 'success');
-            if (type) {{
-                statusBox.classList.add(type);
-            }}
-        }};
-
-        const stopPolling = () => {{
-            if (pollTimer) {{
-                clearInterval(pollTimer);
-                pollTimer = null;
-            }}
-        }};
-
-        const renderReviewCard = (title, review) => {{
-            const status = review.available ? 'completed' : 'processing';
-            const tag = `<span class="status-tag ${{status}}">${{status}}</span>`;
-            const download = review.download_url
-                ? `<p class="downloads"><a href="${{review.download_url}}">下载 DOCX</a></p>`
-                : '';
-            return `
-                <div class="review-card">
-                    <h3>${{title}} ${{tag}}</h3>
-                    <p class="note">模型：${{review.model}}</p>
-                    ${{download}}
-                </div>
-            `;
-        }};
-
-        const renderJobStatus = (payload) => {{
-            if (!payload) {{
-                jobStatus.innerHTML = '<p class="note">暂无任务记录。</p>';
-                return;
-            }}
-
-            const reviews = [];
-            if (payload.round1_reviews && payload.round1_reviews.length) {{
-                payload.round1_reviews.forEach((review, idx) => {{
-                    reviews.push(renderReviewCard(`第一轮评审 ${{idx + 1}}`, review));
-                }});
-            }}
-            if (payload.round2_review) {{
-                reviews.push(renderReviewCard('第二轮元审稿', payload.round2_review));
-            }}
-            if (payload.round3_review) {{
-                reviews.push(renderReviewCard('第三轮事实核查', payload.round3_review));
-            }}
-
-            const cards = reviews.length ? reviews.join('') : '<p class="note">评审结果准备中...</p>';
-            const detail = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
-
-            jobStatus.innerHTML = `
-                <div class="status">
-                    <p><strong>任务状态：</strong> ${{payload.status}}</p>
-                    ${{detail}}
-                    <div class="reviews">${{cards}}</div>
-                </div>
-            `;
-        }};
-
-        const fetchStatus = async (jobId) => {{
-            try {{
-                const response = await fetch(`/api/reviewer/jobs/${{jobId}}`, {{ headers: {{ 'Accept': 'application/json' }} }});
-                if (!response.ok) {{
-                    throw new Error('状态查询失败');
-                }}
-                const payload = await response.json();
-                renderJobStatus(payload);
-
-                if (payload.status === '{STATUS_COMPLETED}' || payload.status === '{STATUS_FAILED}') {{
-                    stopPolling();
-                    if (payload.status === '{STATUS_COMPLETED}') {{
-                        setStatus('审稿完成，可查看下方下载链接。', 'success');
-                    }} else {{
-                        setStatus('任务失败，请查看状态信息。', 'error');
-                    }}
-                }}
-            }} catch (error) {{
-                stopPolling();
-                setStatus('轮询失败：' + error.message, 'error');
-            }}
-        }};
-
-        form.addEventListener('submit', async (event) => {{
-            event.preventDefault();
-            if (!fileInput || fileInput.files.length === 0) {{
-                setStatus('请先选择稿件文件。', 'error');
-                return;
-            }}
-
-            stopPolling();
-            setStatus('正在上传稿件...', null);
-
-            const formData = new FormData(form);
-
-            try {{
-                const response = await fetch('/tools/reviewer/jobs', {{
-                    method: 'POST',
-                    body: formData,
-                }});
-
-                if (!response.ok) {{
-                    const payload = await response.json().catch(() => ({{ message: '提交失败。' }}));
-                    setStatus(payload.message || '提交失败。', 'error');
-                    return;
-                }}
-
-                const payload = await response.json();
-                setStatus('任务已创建，正在执行审稿流程...', 'success');
-                renderJobStatus(null);
-                fetchStatus(payload.job_id);
-                pollTimer = setInterval(() => fetchStatus(payload.job_id), 5000);
-                form.reset();
-                if (fileInput) {{
-                    fileInput.value = '';
-                    fileInput.dispatchEvent(new Event('change'));
-                }}
-            }} catch (error) {{
-                setStatus('提交失败：' + error.message, 'error');
-            }}
-        }});
-    </script>
-    <script>
-{history_script}
-    </script>
-</body>
-</html>"#,
-        upload_styles = upload_styles,
+"#,
         upload_widget = upload_widget,
-        upload_script = upload_script,
-        history_styles = history_styles,
-        history_panel = history_panel,
-        history_script = history_script,
-        admin_link = admin_link,
-        username = username,
-        footer = footer,
     );
+
+    let reviewer_script = r#"const form = document.getElementById('reviewer-form');
+const statusBox = document.getElementById('submission-status');
+const jobStatus = document.getElementById('job-status');
+const fileInput = document.getElementById('reviewer-file');
+const languageSelect = document.getElementById('language');
+let pollTimer = null;
+
+const setStatus = (message, type = null) => {
+    statusBox.textContent = message;
+    statusBox.classList.remove('error', 'success');
+    if (type) {
+        statusBox.classList.add(type);
+    }
+};
+
+const stopPolling = () => {
+    if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+};
+
+const renderReviewCard = (title, review) => {
+    const status = review.available ? 'completed' : 'processing';
+    const tag = `<span class="status-tag ${status}">${status}</span>`;
+    const download = review.download_url
+        ? `<p class="downloads"><a href="${review.download_url}">下载 DOCX</a></p>`
+        : '';
+    return `
+        <div class="review-card">
+            <h3>${title} ${tag}</h3>
+            <p class="note">模型：${review.model}</p>
+            ${download}
+        </div>
+    `;
+};
+
+const renderJobStatus = (payload) => {
+    if (!payload) {
+        jobStatus.innerHTML = '<p class="note">暂无任务记录。</p>';
+        return;
+    }
+
+    const reviews = [];
+    if (payload.round1_reviews && payload.round1_reviews.length) {
+        payload.round1_reviews.forEach((review, idx) => {
+            reviews.push(renderReviewCard(`第一轮评审 ${idx + 1}`, review));
+        });
+    }
+    if (payload.round2_review) {
+        reviews.push(renderReviewCard('第二轮元审稿', payload.round2_review));
+    }
+    if (payload.round3_review) {
+        reviews.push(renderReviewCard('第三轮事实核查', payload.round3_review));
+    }
+
+    const cards = reviews.length ? reviews.join('') : '<p class="note">评审结果准备中...</p>';
+    const detail = payload.status_detail ? `<p class="note">${payload.status_detail}</p>` : '';
+
+    jobStatus.innerHTML = `
+        <div class="status">
+            <p><strong>任务状态：</strong> ${payload.status}</p>
+            ${detail}
+            <div class="reviews">${cards}</div>
+        </div>
+    `;
+};
+
+const fetchStatus = async (jobId) => {
+    try {
+        const response = await fetch(`/api/reviewer/jobs/${jobId}`, { headers: { 'Accept': 'application/json' } });
+        if (!response.ok) {
+            throw new Error('状态查询失败');
+        }
+        const payload = await response.json();
+        renderJobStatus(payload);
+
+        if (payload.status === 'completed' || payload.status === 'failed') {
+            stopPolling();
+            if (payload.status === 'completed') {
+                setStatus('审稿完成，可查看下方下载链接。', 'success');
+            } else {
+                setStatus('任务失败，请查看状态信息。', 'error');
+            }
+        }
+    } catch (error) {
+        stopPolling();
+        setStatus('轮询失败：' + error.message, 'error');
+    }
+};
+
+form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!fileInput || fileInput.files.length === 0) {
+        setStatus('请先选择稿件文件。', 'error');
+        return;
+    }
+
+    stopPolling();
+    setStatus('正在上传稿件...', null);
+
+    const formData = new FormData(form);
+
+    try {
+        const response = await fetch('/tools/reviewer/jobs', {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({ message: '提交失败。' }));
+            setStatus(payload.message || '提交失败。', 'error');
+            return;
+        }
+
+        const payload = await response.json();
+        setStatus('任务已创建，正在执行审稿流程...', 'success');
+        renderJobStatus(null);
+        fetchStatus(payload.job_id);
+        pollTimer = setInterval(() => fetchStatus(payload.job_id), 5000);
+        form.reset();
+        if (fileInput) {
+            fileInput.value = '';
+            fileInput.dispatchEvent(new Event('change'));
+        }
+    } catch (error) {
+        setStatus('提交失败：' + error.message, 'error');
+    }
+});
+"#;
+
+    let html = render_tool_page(ToolPageLayout {
+        meta_title: "审稿助手 | Zhang Group AI Toolkit",
+        page_heading: "审稿助手",
+        username: &username,
+        note_html: Cow::Owned(note_html),
+        tab_group: "reviewer",
+        new_tab_label: "新任务",
+        new_tab_html: Cow::Owned(new_tab_html),
+        history_tab_label: "历史记录",
+        history_panel_html: Cow::Owned(history_panel),
+        admin_link,
+        footer_html: Cow::Owned(render_footer()),
+        extra_style_blocks: vec![
+            Cow::Borrowed(history_ui::HISTORY_STYLES),
+            Cow::Borrowed(UPLOAD_WIDGET_STYLES),
+        ],
+        body_scripts: vec![
+            Cow::Borrowed(UPLOAD_WIDGET_SCRIPT),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                reviewer_script
+            )),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                history_ui::HISTORY_SCRIPT
+            )),
+        ],
+    });
 
     Ok(Html(html))
 }

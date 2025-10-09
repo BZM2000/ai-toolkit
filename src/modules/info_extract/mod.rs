@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io::Cursor,
     path::{Path, PathBuf},
     sync::Arc,
@@ -29,8 +30,9 @@ mod admin;
 
 use crate::web::history_ui;
 use crate::web::{
-    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
-    process_upload_form, render_upload_widget,
+    FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
+    UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
+    render_upload_widget,
 };
 use crate::{
     AppState, SESSION_COOKIE,
@@ -198,14 +200,19 @@ async fn info_extract_page(
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, "未登录或会话失效").into_response())?;
 
-    let footer = render_footer();
     let username = escape_html(&user.username);
+    let note_html = format!(
+        "当前登录：<strong>{username}</strong>。上传最多 100 篇 PDF 论文与字段定义表（XLSX），系统将批量抽取自定义信息并生成汇总表。",
+        username = username,
+    );
     let admin_link = if user.is_admin {
-        r#"<a class="admin-link" href="/dashboard/modules/infoextract">模块管理</a>"#.to_string()
+        Some(ToolAdminLink {
+            href: "/dashboard/modules/infoextract",
+            label: "模块管理",
+        })
     } else {
-        String::new()
+        None
     };
-    let upload_styles = UPLOAD_WIDGET_STYLES;
     let docs_widget = render_upload_widget(
         &UploadWidgetConfig::new(
             "infoextract-docs",
@@ -222,82 +229,18 @@ async fn info_extract_page(
             .with_description("第 1 行名称，第 2 行说明，第 3 行示例（分号分隔），第 4 行枚举（分号分隔）。示例与枚举不可同时填写。")
             .with_accept(".xlsx"),
     );
-    let upload_script = UPLOAD_WIDGET_SCRIPT;
-    let history_styles = history_ui::HISTORY_STYLES;
     let history_panel = history_ui::render_history_panel(MODULE_INFO_EXTRACT);
-    let history_script = history_ui::HISTORY_SCRIPT;
-
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>信息提取 | Zhang Group AI Toolkit</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="robots" content="noindex,nofollow">
-    <style>
-        :root {{ color-scheme: light; }}
-        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
-        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
-        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
-        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
-        .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
-        .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
-        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
-        section {{ margin-bottom: 2.5rem; }}
-        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
-        .panel h2 {{ margin-top: 0; }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
-        button:hover {{ background: #1d4ed8; }}
-        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
-        .note {{ color: #475569; font-size: 0.95rem; line-height: 1.6; }}
-        .status {{ margin-top: 1.5rem; font-size: 0.95rem; }}
-        .status .error {{ color: #b91c1c; }}
-        .status .success {{ color: #166534; }}
-        .job-table {{ width: 100%; border-collapse: collapse; margin-top: 1rem; }}
-        .job-table th, .job-table td {{ padding: 0.65rem 0.85rem; border: 1px solid #e2e8f0; text-align: left; font-size: 0.92rem; }}
-        .job-table th {{ background: #f1f5f9; }}
-        .status-tag {{ display: inline-block; padding: 0.2rem 0.65rem; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }}
-        .status-tag.pending {{ background: #fef3c7; color: #92400e; }}
-        .status-tag.processing {{ background: #e0f2fe; color: #1d4ed8; }}
-        .status-tag.completed {{ background: #dcfce7; color: #166534; }}
-        .status-tag.failed {{ background: #fee2e2; color: #b91c1c; }}
-        .downloads a {{ color: #2563eb; text-decoration: none; font-weight: 600; }}
-        .downloads a:hover {{ text-decoration: underline; }}
-        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
-        {history_styles}
-        @media (max-width: 768px) {{
-            header {{ padding: 1.5rem 1rem; }}
-            main {{ padding: 1.5rem 1rem; }}
-            .header-bar {{ flex-direction: column; align-items: flex-start; }}
-        }}
-        {upload_styles}
-    </style>
-</head>
-<body>
-    <header>
-        <div class="header-bar">
-            <h1>信息提取</h1>
-            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
-                <a class="back-link" href="/">← 返回首页</a>
-                {admin_link}
-            </div>
-        </div>
-        <p class="note">当前登录：<strong>{username}</strong>。上传最多 100 篇 PDF 论文与字段定义表（XLSX），系统将批量抽取自定义信息并生成汇总表。</p>
-    </header>
-    <main>
-        <div class="tool-tabs" data-tab-group="info_extract">
-            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
-            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
-        </div>
-        <div class="tab-container" data-tab-container="info_extract">
-            <div class="tab-section active" data-tab-panel="new">
-                <section class="panel">
+    let extra_styles = Cow::Borrowed(
+        r#"        .status .error { color: #b91c1c; }
+        .status .success { color: #166534; }
+"#,
+    );
+    let new_tab_html = format!(
+        r#"                <section class="panel">
                     <h2>发起新任务</h2>
                     <form id="infoextract-form">
-                        {docs_widget}
-                        {spec_widget}
+{docs_widget}
+{spec_widget}
                         <button type="submit">开始处理</button>
                     </form>
                     <div id="form-status" class="status"></div>
@@ -307,169 +250,185 @@ async fn info_extract_page(
                     <h2>任务进度</h2>
                     <div id="job-status"></div>
                 </section>
-            </div>
-            <div class="tab-section" data-tab-panel="history">
-                {history_panel}
-            </div>
-        </div>
-        {footer}
-    </main>
-    {upload_script}
-    <script>
-        const form = document.getElementById('infoextract-form');
-        const statusBox = document.getElementById('form-status');
-        const jobStatus = document.getElementById('job-status');
-        const documentsInput = document.getElementById('documents');
-        const specInput = document.getElementById('spec');
-        let pollTimer = null;
-
-        const resetStatus = () => {{
-            statusBox.textContent = '';
-            statusBox.classList.remove('error', 'success');
-        }};
-
-        const setStatus = (message, type = null) => {{
-            statusBox.textContent = message;
-            statusBox.classList.remove('error', 'success');
-            if (type) {{
-                statusBox.classList.add(type);
-            }}
-        }};
-
-        const stopPolling = () => {{
-            if (pollTimer) {{
-                clearInterval(pollTimer);
-                pollTimer = null;
-            }}
-        }};
-
-        const renderJobStatus = (payload) => {{
-            if (!payload) {{
-                jobStatus.innerHTML = '<p class="note">暂无任务记录。</p>';
-                return;
-            }}
-
-            const rows = payload.documents.map((doc) => {{
-                const status = doc.status || 'pending';
-                const tagClass = `status-tag ${{status}}`;
-                const detail = doc.status_detail ? `<div class="note">${{doc.status_detail}}</div>` : '';
-                const error = doc.error_message ? `<div class="note" style="color:#b91c1c;">${{doc.error_message}}</div>` : '';
-                return `
-                    <tr>
-                        <td>${{doc.original_filename}}</td>
-                        <td><span class="${{tagClass}}">${{status}}</span></td>
-                        <td>${{doc.attempt_count ?? 0}}</td>
-                    </tr>
-                    ${{detail}}
-                    ${{error}}
-                `;
-            }}).join('');
-
-            const downloadLink = payload.result_download_url
-                ? `<p class="downloads"><a href="${{payload.result_download_url}}">下载提取结果 (XLSX)</a></p>`
-                : '';
-            const statusDetail = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
-            const errorBlock = payload.error_message ? `<p class="note" style="color:#b91c1c;">${{payload.error_message}}</p>` : '';
-
-            jobStatus.innerHTML = `
-                <div class="status">
-                    <p><strong>任务状态：</strong> ${{payload.status}}</p>
-                    ${{statusDetail}}
-                    ${{errorBlock}}
-                    <table class="job-table">
-                        <thead><tr><th>文件名</th><th>状态</th><th>尝试次数</th></tr></thead>
-                        <tbody>${{rows}}</tbody>
-                    </table>
-                    ${{downloadLink}}
-                </div>
-            `;
-        }};
-
-        const fetchJobStatus = async (url) => {{
-            try {{
-                const response = await fetch(url, {{ headers: {{ 'Accept': 'application/json' }} }});
-                if (!response.ok) {{
-                    throw new Error('状态查询失败');
-                }}
-                const payload = await response.json();
-                renderJobStatus(payload);
-
-                if (payload.status === '{STATUS_COMPLETED}' || payload.status === '{STATUS_FAILED}') {{
-                    stopPolling();
-                }}
-            }} catch (error) {{
-                stopPolling();
-                setStatus('轮询失败：' + error.message, 'error');
-            }}
-        }};
-
-        form.addEventListener('submit', async (event) => {{
-            event.preventDefault();
-
-            if (!documentsInput || documentsInput.files.length === 0) {{
-                setStatus('请至少上传一篇 PDF。', 'error');
-                return;
-            }}
-            if (documentsInput.files.length > {MAX_DOCUMENTS}) {{
-                setStatus('上传的论文数量超过上限。', 'error');
-                return;
-            }}
-            if (!specInput || specInput.files.length === 0) {{
-                setStatus('请上传字段定义表。', 'error');
-                return;
-            }}
-
-            stopPolling();
-            setStatus('正在上传文件...', null);
-
-            const formData = new FormData(form);
-
-            try {{
-                const response = await fetch('/tools/infoextract/jobs', {{
-                    method: 'POST',
-                    body: formData,
-                }});
-
-                if (!response.ok) {{
-                    const payload = await response.json().catch(() => ({{ message: '提交失败。' }}));
-                    setStatus(payload.message || '提交失败。', 'error');
-                    return;
-                }}
-
-                const payload = await response.json();
-                setStatus('任务已创建，正在处理...', 'success');
-                fetchJobStatus(payload.status_url);
-                pollTimer = setInterval(() => fetchJobStatus(payload.status_url), 4000);
-                form.reset();
-                if (documentsInput) {{
-                    documentsInput.value = '';
-                    documentsInput.dispatchEvent(new Event('change'));
-                }}
-                if (specInput) {{
-                    specInput.value = '';
-                    specInput.dispatchEvent(new Event('change'));
-                }}
-            }} catch (error) {{
-                setStatus('提交失败：' + error.message, 'error');
-            }}
-        }});
-    </script>
-    <script>
-{history_script}
-    </script>
-</body>
-</html>"#,
-        upload_styles = upload_styles,
+"#,
         docs_widget = docs_widget,
         spec_widget = spec_widget,
-        upload_script = upload_script,
-        history_styles = history_styles,
-        history_panel = history_panel,
-        history_script = history_script,
-        admin_link = admin_link,
-        username = username,
-        footer = footer,
     );
+
+    let script_template = r#"const form = document.getElementById('infoextract-form');
+const statusBox = document.getElementById('form-status');
+const jobStatus = document.getElementById('job-status');
+const documentsInput = document.getElementById('documents');
+const specInput = document.getElementById('spec');
+let pollTimer = null;
+
+const resetStatus = () => {
+    statusBox.textContent = '';
+    statusBox.classList.remove('error', 'success');
+};
+
+const setStatus = (message, type = null) => {
+    statusBox.textContent = message;
+    statusBox.classList.remove('error', 'success');
+    if (type) {
+        statusBox.classList.add(type);
+    }
+};
+
+const stopPolling = () => {
+    if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+    }
+};
+
+const renderJobStatus = (payload) => {
+    if (!payload) {
+        jobStatus.innerHTML = '<p class="note">暂无任务记录。</p>';
+        return;
+    }
+
+    const rows = payload.documents.map((doc) => {
+        const status = doc.status || 'pending';
+        const tagClass = `status-tag ${status}`;
+        const detail = doc.status_detail ? `<div class="note">${doc.status_detail}</div>` : '';
+        const error = doc.error_message ? `<div class="note" style="color:#b91c1c;">${doc.error_message}</div>` : '';
+        return `
+            <tr>
+                <td>${doc.original_filename}</td>
+                <td><span class="${tagClass}">${status}</span></td>
+                <td>${doc.attempt_count ?? 0}</td>
+            </tr>
+            ${detail}
+            ${error}
+        `;
+    }).join('');
+
+    const downloadLink = payload.result_download_url
+        ? `<p class="downloads"><a href="${payload.result_download_url}">下载提取结果 (XLSX)</a></p>`
+        : '';
+    const statusDetail = payload.status_detail ? `<p class="note">${payload.status_detail}</p>` : '';
+    const errorBlock = payload.error_message ? `<p class="note" style="color:#b91c1c;">${payload.error_message}</p>` : '';
+
+    jobStatus.innerHTML = `
+        <div class="status">
+            <p><strong>任务状态：</strong> ${payload.status}</p>
+            ${statusDetail}
+            ${errorBlock}
+            <table class="job-table">
+                <thead><tr><th>文件名</th><th>状态</th><th>尝试次数</th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+            ${downloadLink}
+        </div>
+    `;
+};
+
+const fetchJobStatus = async (url) => {
+    try {
+        const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        if (!response.ok) {
+            throw new Error('状态查询失败');
+        }
+        const payload = await response.json();
+        renderJobStatus(payload);
+
+        if (payload.status === 'completed' || payload.status === 'failed') {
+            stopPolling();
+        }
+    } catch (error) {
+        stopPolling();
+        setStatus('轮询失败：' + error.message, 'error');
+    }
+};
+
+form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    if (!documentsInput || documentsInput.files.length === 0) {
+        setStatus('请至少上传一篇 PDF。', 'error');
+        return;
+    }
+    if (documentsInput.files.length > __MAX_DOCS__) {
+        setStatus('上传的论文数量超过上限。', 'error');
+        return;
+    }
+    if (!specInput || specInput.files.length === 0) {
+        setStatus('请上传字段定义表。', 'error');
+        return;
+    }
+
+    stopPolling();
+    setStatus('正在上传文件...', null);
+
+    const formData = new FormData(form);
+
+    try {
+        const response = await fetch('/tools/infoextract/jobs', {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({ message: '提交失败。' }));
+            setStatus(payload.message || '提交失败。', 'error');
+            return;
+        }
+
+        const payload = await response.json();
+        setStatus('任务已创建，正在处理...', 'success');
+        fetchJobStatus(payload.status_url);
+        pollTimer = setInterval(() => fetchJobStatus(payload.status_url), 4000);
+        form.reset();
+        if (documentsInput) {
+            documentsInput.value = '';
+            documentsInput.dispatchEvent(new Event('change'));
+        }
+        if (specInput) {
+            specInput.value = '';
+            specInput.dispatchEvent(new Event('change'));
+        }
+    } catch (error) {
+        setStatus('提交失败：' + error.message, 'error');
+    }
+});
+"#;
+
+    let info_extract_script = script_template.replace("__MAX_DOCS__", &MAX_DOCUMENTS.to_string());
+
+    let html = render_tool_page(ToolPageLayout {
+        meta_title: "信息提取 | Zhang Group AI Toolkit",
+        page_heading: "信息提取",
+        username: &username,
+        note_html: Cow::Owned(note_html),
+        tab_group: "info_extract",
+        new_tab_label: "新任务",
+        new_tab_html: Cow::Owned(new_tab_html),
+        history_tab_label: "历史记录",
+        history_panel_html: Cow::Owned(history_panel),
+        admin_link,
+        footer_html: Cow::Owned(render_footer()),
+        extra_style_blocks: vec![
+            Cow::Borrowed(history_ui::HISTORY_STYLES),
+            Cow::Borrowed(UPLOAD_WIDGET_STYLES),
+            extra_styles,
+        ],
+        body_scripts: vec![
+            Cow::Borrowed(UPLOAD_WIDGET_SCRIPT),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                info_extract_script
+            )),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                history_ui::HISTORY_SCRIPT
+            )),
+        ],
+    });
 
     Ok(Html(html))
 }

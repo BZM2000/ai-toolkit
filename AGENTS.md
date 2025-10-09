@@ -48,13 +48,14 @@
 - Downstream modules continue to consume shared helpers via re-exports in `src/web/mod.rs` (e.g., glossary/journal fetch helpers, `AppState`, HTML utilities).
 
 ### Adding a New Tool Module (quick guide)
-1. **Module skeleton**: create `src/modules/<tool>/mod.rs` with a `Router<AppState>` builder (`pub fn router() -> Router<AppState>`) exposing `/tools/<tool>` and any `/api/<tool>` endpoints. Follow the structure used by summarizer/translatedocx/grader (shared auth guards live in `web::auth`).
-2. **State/utilities**: use helpers from `AppState` (`state.pool()`/`state.llm_client()`) and shared usage accounting (`crate::usage`). Place module-specific SQL tables/migrations under `migrations/` with incremental numbering—include a `files_purged_at TIMESTAMPTZ` column on your job table for retention bookkeeping.
-3. **Configuration**: extend `ModuleSettings` in `src/config.rs` if the tool needs persisted model/prompt data. Seed defaults in `ensure_defaults`, update admin forms, and persist edits via new DB columns.
-4. **Admin UI wiring**: add a `modules::<tool>::admin` module to serve settings pages, wire its routes from the tool router, and reuse shared HTML helpers (`modules::admin_shared::MODULE_ADMIN_SHARED_STYLES`). POST handlers should call `state.reload_settings()` after writes.
-5. **Usage metering**: register the module in `src/usage.rs` (`REGISTERED_MODULES`) with proper unit/token labels and incorporate limit checks in the module’s request path.
-6. **History & retention hooks**: after inserting a new job, call `history::record_job_start(&pool, MODULE_<TOOL>, user_id, job_id)` so it appears in `/api/history` and the shared panels. Expose status/download endpoints that tolerate missing files and blow away stored paths once `files_purged_at` is set. Reuse `history_ui::render_history_panel` (plus shared JS/CSS) on the tool page so users can revisit past runs.
-7. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool, consider adding a `/jobs` panel card if it requires special messaging, and add docs/tests as necessary.
+1. **Module skeleton**: create `src/modules/<tool>/mod.rs` with a `Router<AppState>` builder (`pub fn router() -> Router<AppState>`) exposing `/tools/<tool>` and any `/api/<tool>` endpoints. Follow the structure used by existing tools (shared auth guards live in `web::auth`).
+2. **Shared page layout**: render the `/tools/<tool>` handler with `render_tool_page(ToolPageLayout { .. })` so the module inherits the standard header/back link/tab shell. Supply your new-task markup via `new_tab_html`, embed `history_ui::render_history_panel(MODULE_<TOOL>)` in `history_panel_html`, and append scripts/CSS through `body_scripts`/`extra_style_blocks` (wrap custom JS in `<script>...</script>` before pushing).
+3. **State/utilities**: use helpers from `AppState` (`state.pool()`/`state.llm_client()`) and shared usage accounting (`crate::usage`). Place module-specific SQL tables/migrations under `migrations/` with incremental numbering—include a `files_purged_at TIMESTAMPTZ` column on your job table for retention bookkeeping.
+4. **Configuration**: extend `ModuleSettings` in `src/config.rs` if the tool needs persisted model/prompt data. Seed defaults in `ensure_defaults`, update admin forms, and persist edits via new DB columns.
+5. **Admin UI wiring**: add a `modules::<tool>::admin` module to serve settings pages, wire its routes from the tool router, and reuse shared HTML helpers (`modules::admin_shared::MODULE_ADMIN_SHARED_STYLES`). POST handlers should call `state.reload_settings()` after writes.
+6. **Usage metering**: register the module in `src/usage.rs` (`REGISTERED_MODULES`) with proper unit/token labels and incorporate limit checks in the module’s request path.
+7. **History & retention hooks**: after inserting a new job, call `history::record_job_start(&pool, MODULE_<TOOL>, user_id, job_id)` so it appears in `/api/history` and the shared panels. Expose status/download endpoints that tolerate missing files and clear stored paths once `files_purged_at` is set.
+8. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool, consider adding a `/jobs` panel card if it requires special messaging, and add docs/tests as necessary.
 
 ## Shared LLM Utility
 - Module: `src/llm/mod.rs` exposes the reusable `LlmClient` plus request/response types.
@@ -99,6 +100,13 @@
   1. Replace the manual `Multipart` loop with `process_upload_form`, persisting DB rows from the returned `SavedFile` metadata.
   2. Swap the HTML drop-zone for `render_upload_widget`, keeping module-specific controls (checkboxes, selects) outside the widget.
   3. Remove bespoke CSS/JS once the shared widget is embedded; retain module-specific copy via `UploadWidgetConfig::with_note` or surrounding labels.
+
+## Shared Tool Page Layout (2025-10-11)
+- `src/web/templates.rs` now exposes `ToolPageLayout` and `ToolAdminLink`; call `render_tool_page` from `/tools/<module>` handlers to inherit the standard header, back link, tab chrome, and footer.
+- Populate the layout slots with module-specific markup: pass the new-task panel HTML (typically two `<section class="panel">` blocks) via `new_tab_html` and reuse `history_ui::render_history_panel(MODULE_<TOOL>)` for `history_panel_html`.
+- Add optional CSS/JS by pushing strings (wrapped in `.into()` / `Cow::Borrowed`) into `extra_style_blocks` and `body_scripts`. Embed `<script>…</script>` around custom scripts before pushing and reuse shared snippets like `UPLOAD_WIDGET_STYLES`/`UPLOAD_WIDGET_SCRIPT` as needed.
+- Provide an `admin_link` when the module has a dashboard settings page so the badge renders automatically; omit it for user-only tools.
+- Summarizer, DOCX translator, info_extract, grader, and reviewer already demonstrate the pattern—mirror their usage when wiring future modules to avoid hand-rolled page scaffolding.
 
 ## Model Configuration
 - All module model selections are stored in the `module_configs` table under the `models` JSON column. Administrators manage these values from the dedicated module setting pages inside the dashboard.
@@ -232,3 +240,4 @@
   - 编写 `maintenance::spawn` 定时任务，24 小时后清理 `storage/*` 产物并清空下载路径；下载接口遇到过期资源返回 410 提示。
   - 前端历史面板支持轮询、状态详情与下载链接，过期任务显示“结果已清除”并禁用下载按钮。
   - 各模块作业创建后统一记录历史，成功/失败队列与下载端点均反映清理状态，确保 24 小时后自动失效。
+- 2025-10-11 (Codex agent): 统一工具页布局，新增 `ToolPageLayout`/`render_tool_page` 并迁移五个模块以复用共享 header/标签页壳，更新新模块指南与文档说明，`cargo check` 通过。

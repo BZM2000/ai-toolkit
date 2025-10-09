@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -27,8 +28,9 @@ mod admin;
 
 use crate::web::history_ui;
 use crate::web::{
-    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
-    process_upload_form, render_upload_widget,
+    FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
+    UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
+    render_upload_widget,
 };
 use crate::{
     AppState, GlossaryTermRow,
@@ -111,81 +113,28 @@ async fn translatedocx_page(
 ) -> Result<Html<String>, Redirect> {
     let user = require_user(&state, &jar).await?;
 
-    let footer = render_footer();
+    let username = escape_html(&user.username);
+    let note_html = format!(
+        "当前登录：<strong>{username}</strong>。上传 DOCX 文件，按照术语表进行精准翻译。",
+        username = username,
+    );
     let admin_link = if user.is_admin {
-        r#"<a class="admin-link" href="/dashboard/modules/translatedocx">模块管理</a>"#
+        Some(ToolAdminLink {
+            href: "/dashboard/modules/translatedocx",
+            label: "模块管理",
+        })
     } else {
-        ""
+        None
     };
-    let upload_styles = UPLOAD_WIDGET_STYLES;
     let upload_widget = render_upload_widget(
         &UploadWidgetConfig::new("translator-upload", "files", "files", "上传 DOCX 文件")
             .with_description("支持上传单个 DOCX 文档。")
             .with_note("本工具一次仅支持处理 1 个文件。")
             .with_accept(".docx"),
     );
-    let upload_script = UPLOAD_WIDGET_SCRIPT;
-    let history_styles = history_ui::HISTORY_STYLES;
     let history_panel = history_ui::render_history_panel(MODULE_TRANSLATE_DOCX);
-    let history_script = history_ui::HISTORY_SCRIPT;
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>DOCX 文档翻译 | 张圆教授课题组 AI 工具箱</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="robots" content="noindex,nofollow">
-    <style>
-        :root {{ color-scheme: light; }}
-        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
-        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
-        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
-        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
-        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
-        section {{ margin-bottom: 2.5rem; }}
-        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
-        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
-        select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
-        select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
-        button:hover {{ background: #1d4ed8; }}
-        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
-        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
-        th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
-        .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
-        .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
-        .status {{ margin-top: 1.5rem; }}
-        .status p {{ margin: 0.25rem 0; }}
-        .note {{ color: #475569; font-size: 0.95rem; }}
-        .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
-        .downloads a:hover {{ text-decoration: underline; }}
-        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
-        {history_styles}
-        {upload_styles}
-    </style>
-</head>
-<body>
-    <header>
-        <div class="header-bar">
-            <h1>DOCX 文档翻译</h1>
-            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
-                <a class="back-link" href="/">← 返回首页</a>
-                {admin_link}
-            </div>
-        </div>
-        <p class="note">当前登录：<strong>{username}</strong>。上传 DOCX 文件，按照术语表进行精准翻译。</p>
-    </header>
-    <main>
-        <div class="tool-tabs" data-tab-group="translatedocx">
-            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
-            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
-        </div>
-        <div class="tab-container" data-tab-container="translatedocx">
-            <div class="tab-section active" data-tab-panel="new">
-                <section class="panel">
+    let new_tab_html = format!(
+        r#"                <section class="panel">
                     <h2>提交新任务</h2>
                     <form id="translator-form">
                         {upload_widget}
@@ -202,167 +151,178 @@ async fn translatedocx_page(
                     <h2>任务进度</h2>
                     <div id="job-status"></div>
                 </section>
-            </div>
-            <div class="tab-section" data-tab-panel="history">
-                {history_panel}
-            </div>
-        </div>
-        {footer}
-    </main>
-    {upload_script}
-    <script>
-        const form = document.getElementById('translator-form');
-        const statusBox = document.getElementById('submission-status');
-        const jobStatus = document.getElementById('job-status');
-        const fileInput = document.getElementById('files');
-        const directionSelect = document.getElementById('direction');
-        let activeJobId = null;
-        let statusTimer = null;
-
-        form.addEventListener('submit', async (event) => {{
-            event.preventDefault();
-
-            if (!fileInput || fileInput.files.length === 0) {{
-                statusBox.textContent = '请先选择 DOCX 文件。';
-                return;
-            }}
-
-            if (fileInput.files.length > 1) {{
-                statusBox.textContent = '一次仅支持上传 1 个文件。';
-                return;
-            }}
-
-            const directionValue = directionSelect.value;
-            const directionLabel = directionValue === 'cn_to_en' ? '中文 → 英文' : '英文 → 中文';
-            statusBox.textContent = `正在上传文档（${{directionLabel}}）...`;
-            const data = new FormData(form);
-
-            try {{
-                const response = await fetch('/tools/translatedocx/jobs', {{
-                    method: 'POST',
-                    body: data,
-                }});
-
-                if (!response.ok) {{
-                    const payload = await response.json().catch(() => ({{ message: '任务创建失败。' }}));
-                    statusBox.textContent = payload.message || '任务创建失败。';
-                    return;
-                }}
-
-                const payload = await response.json();
-                activeJobId = payload.job_id;
-                statusBox.textContent = '任务已创建，正在监控进度...';
-                form.reset();
-                if (fileInput) {{
-                    fileInput.value = '';
-                    fileInput.dispatchEvent(new Event('change'));
-                }}
-                pollStatus(payload.status_url);
-            }} catch (error) {{
-                console.error(error);
-                statusBox.textContent = '提交任务失败。';
-            }}
-        }});
-
-        function pollStatus(url) {{
-            if (statusTimer) {{
-                clearInterval(statusTimer);
-            }}
-
-            const fetchStatus = async () => {{
-                try {{
-                    const response = await fetch(url);
-                    if (!response.ok) {{
-                        jobStatus.textContent = '暂时无法加载任务状态。';
-                        return;
-                    }}
-                    const payload = await response.json();
-                    renderStatus(payload);
-
-                    if (payload.status === '{completed}' || payload.status === '{failed}') {{
-                        clearInterval(statusTimer);
-                    }}
-                }} catch (error) {{
-                    jobStatus.textContent = '暂时无法加载任务状态。';
-                }}
-            }};
-
-            fetchStatus();
-            statusTimer = setInterval(fetchStatus, 4000);
-        }}
-
-        function translateStatus(status) {{
-            const map = {{
-                pending: '待处理',
-                processing: '处理中',
-                completed: '已完成',
-                failed: '已失败',
-                queued: '排队中',
-            }};
-            return map[status] || status;
-        }}
-
-        function renderStatus(payload) {{
-            if (!payload) {{
-                jobStatus.textContent = '';
-                return;
-            }}
-
-            let docRows = payload.documents.map((doc) => {{
-                const downloadLink = doc.translated_download_url ? `<a href="${{doc.translated_download_url}}">下载译文 DOCX</a>` : '处理中';
-                const detailRow = doc.status_detail ? `<tr><td colspan="3"><div class="note">${{doc.status_detail}}</div></td></tr>` : '';
-                const errorRow = doc.error_message ? `<tr><td colspan="3"><div class="note">${{doc.error_message}}</div></td></tr>` : '';
-                const statusLabel = translateStatus(doc.status);
-                return `
-                    <tr>
-                        <td>${{doc.original_filename}}</td>
-                        <td>${{statusLabel}}</td>
-                        <td class="downloads">${{downloadLink}}</td>
-                    </tr>
-                    ${{detailRow}}
-                    ${{errorRow}}
-                `;
-            }}).join('');
-            if (!docRows) {{
-                docRows = '<tr><td colspan="3">暂无文件记录。</td></tr>';
-            }}
-
-            const directionBlock = payload.translation_direction ? `<p class="note">翻译方向：${{payload.translation_direction}}</p>` : '';
-            const detailBlock = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
-            const errorBlock = payload.error_message ? `<p class="note">${{payload.error_message}}</p>` : '';
-            const jobStatusLabel = translateStatus(payload.status);
-
-            jobStatus.innerHTML = `
-                <div class="status">
-                    <p><strong>任务状态：</strong> ${{jobStatusLabel}}</p>
-                    ${{directionBlock}}
-                    ${{detailBlock}}
-                    ${{errorBlock}}
-                    <table>
-                        <thead><tr><th>文件名</th><th>状态</th><th>下载</th></tr></thead>
-                        <tbody>${{docRows}}</tbody>
-                    </table>
-                </div>
-            `;
-        }}
-    </script>
-    <script>
-{history_script}
-    </script>
-</body>
-</html>"#,
-        upload_styles = upload_styles,
+"#,
         upload_widget = upload_widget,
-        upload_script = upload_script,
-        history_styles = history_styles,
-        history_panel = history_panel,
-        history_script = history_script,
-        username = escape_html(&user.username),
-        completed = STATUS_COMPLETED,
-        failed = STATUS_FAILED,
-        footer = footer,
-        admin_link = admin_link,
     );
+
+    let translator_script = r#"const form = document.getElementById('translator-form');
+const statusBox = document.getElementById('submission-status');
+const jobStatus = document.getElementById('job-status');
+const fileInput = document.getElementById('files');
+const directionSelect = document.getElementById('direction');
+let activeJobId = null;
+let statusTimer = null;
+
+form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    if (!fileInput || fileInput.files.length === 0) {
+        statusBox.textContent = '请先选择 DOCX 文件。';
+        return;
+    }
+
+    if (fileInput.files.length > 1) {
+        statusBox.textContent = '一次仅支持上传 1 个文件。';
+        return;
+    }
+
+    const directionValue = directionSelect.value;
+    const directionLabel = directionValue === 'cn_to_en' ? '中文 → 英文' : '英文 → 中文';
+    statusBox.textContent = `正在上传文档（${directionLabel}）...`;
+    const data = new FormData(form);
+
+    try {
+        const response = await fetch('/tools/translatedocx/jobs', {
+            method: 'POST',
+            body: data,
+        });
+
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({ message: '任务创建失败。' }));
+            statusBox.textContent = payload.message || '任务创建失败。';
+            return;
+        }
+
+        const payload = await response.json();
+        activeJobId = payload.job_id;
+        statusBox.textContent = '任务已创建，正在监控进度...';
+        form.reset();
+        if (fileInput) {
+            fileInput.value = '';
+            fileInput.dispatchEvent(new Event('change'));
+        }
+        pollStatus(payload.status_url);
+    } catch (error) {
+        console.error(error);
+        statusBox.textContent = '提交任务失败。';
+    }
+});
+
+function pollStatus(url) {
+    if (statusTimer) {
+        clearInterval(statusTimer);
+    }
+
+    const fetchStatus = async () => {
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                jobStatus.textContent = '暂时无法加载任务状态。';
+                return;
+            }
+            const payload = await response.json();
+            renderStatus(payload);
+
+            if (payload.status === 'completed' || payload.status === 'failed') {
+                clearInterval(statusTimer);
+            }
+        } catch (error) {
+            jobStatus.textContent = '暂时无法加载任务状态。';
+        }
+    };
+
+    fetchStatus();
+    statusTimer = setInterval(fetchStatus, 4000);
+}
+
+function translateStatus(status) {
+    const map = {
+        pending: '待处理',
+        processing: '处理中',
+        completed: '已完成',
+        failed: '已失败',
+        queued: '排队中',
+    };
+    return map[status] || status;
+}
+
+function renderStatus(payload) {
+    if (!payload) {
+        jobStatus.textContent = '';
+        return;
+    }
+
+    let docRows = payload.documents.map((doc) => {
+        const downloadLink = doc.translated_download_url ? `<a href="${doc.translated_download_url}">下载译文 DOCX</a>` : '处理中';
+        const detailRow = doc.status_detail ? `<tr><td colspan="3"><div class="note">${doc.status_detail}</div></td></tr>` : '';
+        const errorRow = doc.error_message ? `<tr><td colspan="3"><div class="note">${doc.error_message}</div></td></tr>` : '';
+        const statusLabel = translateStatus(doc.status);
+        return `
+            <tr>
+                <td>${doc.original_filename}</td>
+                <td>${statusLabel}</td>
+                <td class="downloads">${downloadLink}</td>
+            </tr>
+            ${detailRow}
+            ${errorRow}
+        `;
+    }).join('');
+    if (!docRows) {
+        docRows = '<tr><td colspan="3">暂无文件记录。</td></tr>';
+    }
+
+    const directionBlock = payload.translation_direction ? `<p class="note">翻译方向：${payload.translation_direction}</p>` : '';
+    const detailBlock = payload.status_detail ? `<p class="note">${payload.status_detail}</p>` : '';
+    const errorBlock = payload.error_message ? `<p class="note">${payload.error_message}</p>` : '';
+    const jobStatusLabel = translateStatus(payload.status);
+
+    jobStatus.innerHTML = `
+        <div class="status">
+            <p><strong>任务状态：</strong> ${jobStatusLabel}</p>
+            ${directionBlock}
+            ${detailBlock}
+            ${errorBlock}
+            <table>
+                <thead><tr><th>文件名</th><th>状态</th><th>下载</th></tr></thead>
+                <tbody>${docRows}</tbody>
+            </table>
+        </div>
+    `;
+}
+"#;
+
+    let html = render_tool_page(ToolPageLayout {
+        meta_title: "DOCX 文档翻译 | 张圆教授课题组 AI 工具箱",
+        page_heading: "DOCX 文档翻译",
+        username: &username,
+        note_html: Cow::Owned(note_html),
+        tab_group: "translatedocx",
+        new_tab_label: "新任务",
+        new_tab_html: Cow::Owned(new_tab_html),
+        history_tab_label: "历史记录",
+        history_panel_html: Cow::Owned(history_panel),
+        admin_link,
+        footer_html: Cow::Owned(render_footer()),
+        extra_style_blocks: vec![
+            Cow::Borrowed(history_ui::HISTORY_STYLES),
+            Cow::Borrowed(UPLOAD_WIDGET_STYLES),
+        ],
+        body_scripts: vec![
+            Cow::Borrowed(UPLOAD_WIDGET_SCRIPT),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                translator_script
+            )),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                history_ui::HISTORY_SCRIPT
+            )),
+        ],
+    });
 
     Ok(Html(html))
 }

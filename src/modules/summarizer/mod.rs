@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -29,8 +30,9 @@ mod admin;
 
 use crate::web::history_ui;
 use crate::web::{
-    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
-    process_upload_form, render_upload_widget,
+    FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
+    UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
+    render_upload_widget,
 };
 use crate::{
     AppState, GlossaryTermRow,
@@ -78,13 +80,19 @@ async fn summarizer_page(
 ) -> Result<Html<String>, Redirect> {
     let user = require_user(&state, &jar).await?;
 
-    let footer = render_footer();
+    let username = escape_html(&user.username);
+    let note_html = format!(
+        "当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 文件生成结构化摘要，并可输出中文译文。",
+        username = username,
+    );
     let admin_link = if user.is_admin {
-        r#"<a class="admin-link" href="/dashboard/modules/summarizer">模块管理</a>"#
+        Some(ToolAdminLink {
+            href: "/dashboard/modules/summarizer",
+            label: "模块管理",
+        })
     } else {
-        ""
+        None
     };
-    let upload_styles = UPLOAD_WIDGET_STYLES;
     let upload_widget = render_upload_widget(
         &UploadWidgetConfig::new("summarizer-upload", "files", "files", "上传文件")
             .with_description("支持上传 PDF、DOCX 或 TXT 文档。")
@@ -92,76 +100,9 @@ async fn summarizer_page(
             .with_note("每个任务最多可提交 100 个文件。")
             .with_accept(".pdf,.docx,.txt"),
     );
-    let upload_script = UPLOAD_WIDGET_SCRIPT;
-    let history_styles = history_ui::HISTORY_STYLES;
     let history_panel = history_ui::render_history_panel(MODULE_SUMMARIZER);
-    let history_script = history_ui::HISTORY_SCRIPT;
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>文档摘要与翻译 | 张圆教授课题组 AI 工具箱</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="robots" content="noindex,nofollow">
-    <style>
-        :root {{ color-scheme: light; }}
-        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
-        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
-        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
-        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
-        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
-        section {{ margin-bottom: 2.5rem; }}
-        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
-        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
-        select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
-        select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
-        input[type="checkbox"] {{ margin-right: 0.5rem; }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
-        button:hover {{ background: #1d4ed8; }}
-        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
-        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
-        th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
-        .status {{ margin-top: 1.5rem; }}
-        .status p {{ margin: 0.25rem 0; }}
-        .note {{ color: #475569; font-size: 0.95rem; }}
-        .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
-        .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
-        .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
-        .downloads a:hover {{ text-decoration: underline; }}
-        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
-        {history_styles}
-        @media (max-width: 768px) {{
-            header {{ padding: 1.5rem 1rem; }}
-            main {{ padding: 1.5rem 1rem; }}
-            .header-bar {{ flex-direction: column; align-items: flex-start; }}
-            table {{ font-size: 0.9rem; }}
-            th, td {{ padding: 0.5rem; }}
-        }}
-        {upload_styles}
-    </style>
-</head>
-<body>
-    <header>
-        <div class="header-bar">
-            <h1>文档摘要与翻译</h1>
-            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
-                <a class="back-link" href="/">← 返回首页</a>
-                {admin_link}
-            </div>
-        </div>
-        <p class="note">当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 文件生成结构化摘要，并可输出中文译文。</p>
-    </header>
-    <main>
-        <div class="tool-tabs" data-tab-group="summarizer">
-            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
-            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
-        </div>
-        <div class="tab-container" data-tab-container="summarizer">
-            <div class="tab-section active" data-tab-panel="new">
-                <section class="panel">
+    let new_tab_html = format!(
+        r#"                <section class="panel">
                     <h2>发起新任务</h2>
                     <form id="summarizer-form">
                         {upload_widget}
@@ -179,150 +120,161 @@ async fn summarizer_page(
                     <h2>任务进度</h2>
                     <div id="job-status"></div>
                 </section>
-            </div>
-            <div class="tab-section" data-tab-panel="history">
-                {history_panel}
-            </div>
-        </div>
-        {footer}
-    </main>
-    {upload_script}
-    <script>
-        const form = document.getElementById('summarizer-form');
-        const statusBox = document.getElementById('submission-status');
-        const jobStatus = document.getElementById('job-status');
-        const fileInput = document.getElementById('files');
-        let activeJobId = null;
-        let statusTimer = null;
-
-        form.addEventListener('submit', async (event) => {{
-            event.preventDefault();
-
-            if (!fileInput || fileInput.files.length === 0) {{
-                statusBox.innerHTML = '<span style="color: #dc2626;">请至少选择一个文件。</span>';
-                return;
-            }}
-
-            if (fileInput.files.length > 100) {{
-                statusBox.innerHTML = '<span style="color: #dc2626;">文件数量超过限制（最多 100 个）。</span>';
-                return;
-            }}
-
-            statusBox.textContent = '正在上传文件...';
-            const data = new FormData(form);
-
-            try {{
-                const response = await fetch('/tools/summarizer/jobs', {{
-                    method: 'POST',
-                    body: data,
-                }});
-
-                if (!response.ok) {{
-                    const payload = await response.json().catch(() => ({{ message: '任务提交失败。' }}));
-                    statusBox.innerHTML = `<span style="color: #dc2626;">${{payload.message || '任务提交失败。'}}</span>`;
-                    return;
-                }}
-
-                const payload = await response.json();
-                activeJobId = payload.job_id;
-                statusBox.innerHTML = '<span style="color: #16a34a;">任务已入队，正在监控进度...</span>';
-                form.reset();
-                if (fileInput) {{
-                    fileInput.value = '';
-                    fileInput.dispatchEvent(new Event('change'));
-                }}
-                pollStatus();
-            }} catch (err) {{
-                console.error(err);
-                statusBox.innerHTML = '<span style="color: #dc2626;">提交任务时发生异常。</span>';
-            }}
-        }});
-
-        function pollStatus() {{
-            if (!activeJobId) return;
-
-            clearTimeout(statusTimer);
-            fetch(`/api/summarizer/jobs/${{activeJobId}}`).then(async (response) => {{
-                if (!response.ok) {{
-                    jobStatus.innerHTML = '<p class="note">无法加载任务状态，请刷新页面。</p>';
-                    return;
-                }}
-
-                const payload = await response.json();
-                renderStatus(payload);
-
-                if (payload.status === '{completed}' || payload.status === '{failed}') {{
-                    activeJobId = null;
-                    return;
-                }}
-
-                statusTimer = setTimeout(pollStatus, 4000);
-            }}).catch((err) => {{
-                console.error(err);
-                jobStatus.innerHTML = '<p class="note">无法加载任务状态，请刷新页面。</p>';
-            }});
-        }}
-
-        function translateStatus(status) {{
-            const map = {{
-                pending: '待处理',
-                processing: '处理中',
-                completed: '已完成',
-                failed: '已失败',
-                queued: '排队中',
-            }};
-            return map[status] || status;
-        }}
-
-        function renderStatus(payload) {{
-            let docRows = payload.documents.map((doc) => {{
-                const detail = doc.status_detail ? `<div class="note">${{doc.status_detail}}</div>` : '';
-                const error = doc.error_message ? `<div class="note">${{doc.error_message}}</div>` : '';
-                const statusLabel = translateStatus(doc.status);
-                return `<tr><td>${{doc.original_filename}}</td><td>${{statusLabel}}</td></tr>${{detail ? `<tr><td colspan=2>${{detail}}</td></tr>` : ''}}{{error ? `<tr><td colspan=2>${{error}}</td></tr>` : ''}}`;
-            }}).join('');
-            if (!docRows) {{
-                docRows = '<tr><td colspan="2">暂无文件记录。</td></tr>';
-            }}
-
-            const combinedSummary = payload.combined_summary_url ? `<a href="${{payload.combined_summary_url}}">下载汇总摘要</a>` : '';
-            const combinedTranslation = payload.combined_translation_url ? `<a href="${{payload.combined_translation_url}}">下载汇总译文</a>` : '';
-            const combinedBlock = combinedSummary || combinedTranslation ? `<p class="downloads">${{combinedSummary}} ${{combinedTranslation}}</p>` : '';
-            const errorBlock = payload.error_message ? `<p class="note">${{payload.error_message}}</p>` : '';
-            const detailBlock = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
-            const jobStatusLabel = translateStatus(payload.status);
-
-            jobStatus.innerHTML = `
-                <div class="status">
-                    <p><strong>任务状态：</strong> ${{jobStatusLabel}}</p>
-                    ${{detailBlock}}
-                    ${{errorBlock}}
-                    <table>
-                        <thead><tr><th>文件名</th><th>状态</th></tr></thead>
-                        <tbody>${{docRows}}</tbody>
-                    </table>
-                    ${{combinedBlock}}
-                </div>
-            `;
-        }}
-    </script>
-    <script>
-{history_script}
-    </script>
-</body>
-</html>"#,
-        upload_styles = upload_styles,
+"#,
         upload_widget = upload_widget,
-        upload_script = upload_script,
-        history_styles = history_styles,
-        history_panel = history_panel,
-        history_script = history_script,
-        username = escape_html(&user.username),
-        completed = STATUS_COMPLETED,
-        failed = STATUS_FAILED,
-        footer = footer,
-        admin_link = admin_link,
     );
+
+    let summarizer_script = r#"const form = document.getElementById('summarizer-form');
+const statusBox = document.getElementById('submission-status');
+const jobStatus = document.getElementById('job-status');
+const fileInput = document.getElementById('files');
+let activeJobId = null;
+let statusTimer = null;
+
+form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+
+    if (!fileInput || fileInput.files.length === 0) {
+        statusBox.innerHTML = '<span style="color: #dc2626;">请至少选择一个文件。</span>';
+        return;
+    }
+
+    if (fileInput.files.length > 100) {
+        statusBox.innerHTML = '<span style="color: #dc2626;">文件数量超过限制（最多 100 个）。</span>';
+        return;
+    }
+
+    statusBox.textContent = '正在上传文件...';
+    const data = new FormData(form);
+
+    try {
+        const response = await fetch('/tools/summarizer/jobs', {
+            method: 'POST',
+            body: data,
+        });
+
+        if (!response.ok) {
+            const payload = await response.json().catch(() => ({ message: '任务提交失败。' }));
+            statusBox.innerHTML = `<span style="color: #dc2626;">${payload.message || '任务提交失败。'}</span>`;
+            return;
+        }
+
+        const payload = await response.json();
+        activeJobId = payload.job_id;
+        statusBox.innerHTML = '<span style="color: #16a34a;">任务已入队，正在监控进度...</span>';
+        form.reset();
+        if (fileInput) {
+            fileInput.value = '';
+            fileInput.dispatchEvent(new Event('change'));
+        }
+        pollStatus();
+    } catch (err) {
+        console.error(err);
+        statusBox.innerHTML = '<span style="color: #dc2626;">提交任务时发生异常。</span>';
+    }
+});
+
+function pollStatus() {
+    if (!activeJobId) return;
+
+    clearTimeout(statusTimer);
+    fetch(`/api/summarizer/jobs/${activeJobId}`).then(async (response) => {
+        if (!response.ok) {
+            jobStatus.innerHTML = '<p class="note">无法加载任务状态，请刷新页面。</p>';
+            return;
+        }
+
+        const payload = await response.json();
+        renderStatus(payload);
+
+        if (payload.status === 'completed' || payload.status === 'failed') {
+            activeJobId = null;
+            return;
+        }
+
+        statusTimer = setTimeout(pollStatus, 4000);
+    }).catch((err) => {
+        console.error(err);
+        jobStatus.innerHTML = '<p class="note">无法加载任务状态，请刷新页面。</p>';
+    });
+}
+
+function translateStatus(status) {
+    const map = {
+        pending: '待处理',
+        processing: '处理中',
+        completed: '已完成',
+        failed: '已失败',
+        queued: '排队中',
+    };
+    return map[status] || status;
+}
+
+function renderStatus(payload) {
+    let docRows = payload.documents.map((doc) => {
+        const detail = doc.status_detail ? `<div class="note">${doc.status_detail}</div>` : '';
+        const error = doc.error_message ? `<div class="note">${doc.error_message}</div>` : '';
+        const statusLabel = translateStatus(doc.status);
+        return `<tr><td>${doc.original_filename}</td><td>${statusLabel}</td></tr>${detail ? `<tr><td colspan=2>${detail}</td></tr>` : ''}${error ? `<tr><td colspan=2>${error}</td></tr>` : ''}`;
+    }).join('');
+    if (!docRows) {
+        docRows = '<tr><td colspan="2">暂无文件记录。</td></tr>';
+    }
+
+    const combinedSummary = payload.combined_summary_url ? `<a href="${payload.combined_summary_url}">下载汇总摘要</a>` : '';
+    const combinedTranslation = payload.combined_translation_url ? `<a href="${payload.combined_translation_url}">下载汇总译文</a>` : '';
+    const combinedBlock = combinedSummary || combinedTranslation ? `<p class="downloads">${combinedSummary} ${combinedTranslation}</p>` : '';
+    const errorBlock = payload.error_message ? `<p class="note">${payload.error_message}</p>` : '';
+    const detailBlock = payload.status_detail ? `<p class="note">${payload.status_detail}</p>` : '';
+    const jobStatusLabel = translateStatus(payload.status);
+
+    jobStatus.innerHTML = `
+        <div class="status">
+            <p><strong>任务状态：</strong> ${jobStatusLabel}</p>
+            ${detailBlock}
+            ${errorBlock}
+            <table>
+                <thead><tr><th>文件名</th><th>状态</th></tr></thead>
+                <tbody>${docRows}</tbody>
+            </table>
+            ${combinedBlock}
+        </div>
+    `;
+}
+"#;
+
+    let html = render_tool_page(ToolPageLayout {
+        meta_title: "文档摘要与翻译 | 张圆教授课题组 AI 工具箱",
+        page_heading: "文档摘要与翻译",
+        username: &username,
+        note_html: Cow::Owned(note_html),
+        tab_group: "summarizer",
+        new_tab_label: "新任务",
+        new_tab_html: Cow::Owned(new_tab_html),
+        history_tab_label: "历史记录",
+        history_panel_html: Cow::Owned(history_panel),
+        admin_link,
+        footer_html: Cow::Owned(render_footer()),
+        extra_style_blocks: vec![
+            Cow::Borrowed(history_ui::HISTORY_STYLES),
+            Cow::Borrowed(UPLOAD_WIDGET_STYLES),
+        ],
+        body_scripts: vec![
+            Cow::Borrowed(UPLOAD_WIDGET_SCRIPT),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                summarizer_script
+            )),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                history_ui::HISTORY_SCRIPT
+            )),
+        ],
+    });
 
     Ok(Html(html))
 }

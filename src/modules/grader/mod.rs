@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     fs,
     io::Read,
@@ -29,8 +30,9 @@ mod admin;
 
 use crate::web::history_ui;
 use crate::web::{
-    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
-    process_upload_form, render_upload_widget,
+    FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
+    UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
+    render_upload_widget,
 };
 use crate::{
     AppState, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow, escape_html,
@@ -226,79 +228,33 @@ pub async fn grader_page(
     jar: CookieJar,
 ) -> Result<Html<String>, Redirect> {
     let user = require_user(&state, &jar).await?;
-    let footer = render_footer();
+    let username = escape_html(&user.username);
+    let note_html = format!(
+        "当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 稿件，系统会估计投稿水平并推荐期刊。",
+        username = username,
+    );
     let admin_link = if user.is_admin {
-        r#"<a class="admin-link" href="/dashboard/modules/grader">模块管理</a>"#
+        Some(ToolAdminLink {
+            href: "/dashboard/modules/grader",
+            label: "模块管理",
+        })
     } else {
-        ""
+        None
     };
-    let upload_styles = UPLOAD_WIDGET_STYLES;
     let upload_widget = render_upload_widget(
         &UploadWidgetConfig::new("grader-upload", "grader-file", "file", "稿件文件")
             .with_description("支持上传 PDF、DOCX 或 TXT 稿件。")
             .with_note("仅支持单个 PDF / DOCX / TXT 文件。")
             .with_accept(".pdf,.docx,.txt"),
     );
-    let upload_script = UPLOAD_WIDGET_SCRIPT;
-    let history_styles = history_ui::HISTORY_STYLES;
     let history_panel = history_ui::render_history_panel(MODULE_GRADER);
-    let history_script = history_ui::HISTORY_SCRIPT;
-
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <title>稿件评估与期刊推荐 | 张圆教授课题组 AI 工具箱</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="robots" content="noindex,nofollow">
-    <style>
-        :root {{ color-scheme: light; }}
-        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; }}
-        header {{ background: #ffffff; padding: 2rem 1.5rem; border-bottom: 1px solid #e2e8f0; }}
-        .header-bar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }}
-        .back-link {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #1d4ed8; text-decoration: none; font-weight: 600; background: #e0f2fe; padding: 0.5rem 0.95rem; border-radius: 999px; border: 1px solid #bfdbfe; transition: background 0.15s ease, border 0.15s ease; }}
-        .back-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
-        main {{ padding: 2rem 1.5rem; max-width: 960px; margin: 0 auto; box-sizing: border-box; }}
-        section {{ margin-bottom: 2.5rem; }}
-        .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
-        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
-        button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
-        button:hover {{ background: #1d4ed8; }}
-        button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
-        .note {{ color: #475569; font-size: 0.95rem; margin-top: 0.5rem; }}
-        .status-box {{ margin-top: 1rem; padding: 1rem; border-radius: 12px; background: #f1f5f9; color: #0f172a; min-height: 3rem; }}
-        .results {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06); }}
-        .results h3 {{ margin-top: 0; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 1.5rem; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }}
-        th, td {{ padding: 0.75rem 1rem; border-bottom: 1px solid #e2e8f0; text-align: left; }}
-        th {{ background: #f1f5f9; color: #0f172a; font-weight: 600; }}
-        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
-        .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
-        .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
-        {history_styles}
-        {upload_styles}
-    </style>
-</head>
-<body>
-    <header>
-        <div class="header-bar">
-            <h1>稿件评估与期刊推荐</h1>
-            <div style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
-                <a class="back-link" href="/">← 返回首页</a>
-                {admin_link}
-            </div>
-        </div>
-        <p class="note">当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 稿件，系统会估计投稿水平并推荐期刊。</p>
-    </header>
-    <main>
-        <div class="tool-tabs" data-tab-group="grader">
-            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
-            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
-        </div>
-        <div class="tab-container" data-tab-container="grader">
-            <div class="tab-section active" data-tab-panel="new">
-                <section class="panel">
+    let extra_styles = Cow::Borrowed(
+        r#"        .results { background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06); }
+        .results h3 { margin-top: 0; }
+"#,
+    );
+    let new_tab_html = format!(
+        r#"                <section class="panel">
                     <h2>提交稿件</h2>
                     <form id="grader-form">
                         {upload_widget}
@@ -312,183 +268,197 @@ pub async fn grader_page(
                     <div id="keyword-summary"></div>
                     <div id="recommendations"></div>
                 </section>
-            </div>
-            <div class="tab-section" data-tab-panel="history">
-                {history_panel}
-            </div>
-        </div>
-        {footer}
-    </main>
-    {upload_script}
-    <script>
-        const form = document.getElementById('grader-form');
-        const fileInput = document.getElementById('grader-file');
-        const statusBox = document.getElementById('status-box');
-        const resultsSection = document.getElementById('results-section');
-        const scoreSummary = document.getElementById('score-summary');
-        const keywordSummary = document.getElementById('keyword-summary');
-        const recommendationsBox = document.getElementById('recommendations');
-
-        let pollTimer = null;
-
-        const resetResults = () => {{
-            resultsSection.style.display = 'none';
-            scoreSummary.innerHTML = '';
-            keywordSummary.innerHTML = '';
-            recommendationsBox.innerHTML = '';
-        }};
-
-        const renderRecommendations = (items) => {{
-            if (!items || items.length === 0) {{
-                recommendationsBox.innerHTML = '<p class="note">暂无匹配的期刊推荐。</p>';
-                return;
-            }}
-            let rows = items.map(item => {{
-                const mark = item.reference_mark ? item.reference_mark : '—';
-                return `<tr><td>${{item.journal_name}}</td><td>${{mark}}</td><td>${{item.match_score.toFixed(1)}}`+
-                       `</td><td>${{item.adjusted_threshold.toFixed(2)}}</td><td>${{item.low_bound.toFixed(2)}}</td></tr>`;
-            }}).join('');
-            recommendationsBox.innerHTML = `
-                <h3>期刊推荐</h3>
-                <table>
-                    <thead><tr><th>期刊</th><th>参考标记</th><th>匹配得分</th><th>调整后阈值</th><th>原始阈值</th></tr></thead>
-                    <tbody>${{rows}}</tbody>
-                </table>`;
-        }};
-
-        const renderKeywords = (main, peripherals) => {{
-            const mainText = main ? `<strong>主要主题：</strong> ${{main}}` : '<strong>主要主题：</strong> 未识别';
-            const peripheralText = peripherals && peripherals.length > 0 ? peripherals.join('，') : '无';
-            keywordSummary.innerHTML = `
-                <h3>主题分析</h3>
-                <p>${{mainText}}</p>
-                <p><strong>相关主题：</strong> ${{peripheralText}}</p>
-            `;
-        }};
-
-        const renderScore = (data) => {{
-            if (typeof data.iqm_score !== 'number') {{
-                scoreSummary.innerHTML = '<p class="note">尚未产生评分。</p>';
-                return;
-            }}
-            const attempts = data.attempts_run ?? 0;
-            const valid = data.valid_runs ?? 0;
-            const justification = data.justification ? `<p><strong>模型说明：</strong> ${{data.justification}}</p>` : '';
-            const decision = data.decision_reason ? `<p class="note">${{data.decision_reason}}</p>` : '';
-            scoreSummary.innerHTML = `
-                <h3>综合评分</h3>
-                <p><strong>IQM 评分：</strong> ${{data.iqm_score.toFixed(1)}}</p>
-                <p class="note">有效结果 ${{valid}} 次，共尝试 ${{attempts}} 次。</p>
-                ${{justification}}
-                ${{decision}}
-            `;
-        }};
-
-        const updateStatus = (payload) => {{
-            statusBox.textContent = payload;
-        }};
-
-        const handleStatusPayload = (payload) => {{
-            updateStatus(payload.status_detail || `当前状态：${{payload.status}}`);
-
-            if (payload.status === 'completed') {{
-                renderScore(payload);
-                renderKeywords(payload.keyword_main, payload.keyword_peripherals);
-                renderRecommendations(payload.recommendations);
-                resultsSection.style.display = 'block';
-                if (pollTimer) {{
-                    clearInterval(pollTimer);
-                    pollTimer = null;
-                }}
-            }} else if (payload.status === 'failed') {{
-                const message = payload.error_message || '评估失败，请稍后重试。';
-                statusBox.textContent = message;
-                if (pollTimer) {{
-                    clearInterval(pollTimer);
-                    pollTimer = null;
-                }}
-            }}
-        }};
-
-        const pollJob = (url) => {{
-            pollTimer = setInterval(async () => {{
-                try {{
-                    const res = await fetch(url, {{ headers: {{ 'Accept': 'application/json' }} }});
-                    if (!res.ok) {{
-                        throw new Error('状态查询失败');
-                    }}
-                    const data = await res.json();
-                    handleStatusPayload(data);
-                    if (data.status === 'completed' || data.status === 'failed') {{
-                        clearInterval(pollTimer);
-                        pollTimer = null;
-                    }}
-                }} catch (err) {{
-                    clearInterval(pollTimer);
-                    pollTimer = null;
-                    updateStatus('轮询失败：' + err.message);
-                }}
-            }}, 3000);
-        }};
-
-        const handleFileSelection = () => {{
-            if (!fileInput || fileInput.files.length === 0) {{
-                updateStatus('等待上传。');
-                return;
-            }}
-            updateStatus(`已选择文件：${{fileInput.files[0].name}}`);
-        }};
-
-        if (fileInput) {{
-            fileInput.addEventListener('change', handleFileSelection);
-        }}
-
-        form.addEventListener('submit', async (event) => {{
-            event.preventDefault();
-            if (!fileInput.files || fileInput.files.length === 0) {{
-                updateStatus('请先选择文件。');
-                return;
-            }}
-            resetResults();
-            updateStatus('正在上传稿件...');
-            const formData = new FormData(form);
-
-            try {{
-                const res = await fetch('/tools/grader/jobs', {{ method: 'POST', body: formData }});
-                if (!res.ok) {{
-                    const errorBody = await res.json().catch(() => ({{ message: '提交失败' }}));
-                    updateStatus(errorBody.message || '提交失败');
-                    return;
-                }}
-                const data = await res.json();
-                handleStatusPayload(data);
-                if (fileInput) {{
-                    fileInput.value = '';
-                    fileInput.dispatchEvent(new Event('change'));
-                }}
-                if (data.status_url) {{
-                    pollJob(data.status_url);
-                }}
-            }} catch (err) {{
-                updateStatus('提交失败：' + err.message);
-            }}
-        }});
-    </script>
-    <script>
-{history_script}
-    </script>
-</body>
-</html>"#,
-        upload_styles = upload_styles,
+"#,
         upload_widget = upload_widget,
-        upload_script = upload_script,
-        history_styles = history_styles,
-        history_panel = history_panel,
-        history_script = history_script,
-        username = escape_html(&user.username),
-        footer = footer,
-        admin_link = admin_link,
     );
+
+    let grader_script = r#"const form = document.getElementById('grader-form');
+const fileInput = document.getElementById('grader-file');
+const statusBox = document.getElementById('status-box');
+const resultsSection = document.getElementById('results-section');
+const scoreSummary = document.getElementById('score-summary');
+const keywordSummary = document.getElementById('keyword-summary');
+const recommendationsBox = document.getElementById('recommendations');
+
+let pollTimer = null;
+
+const resetResults = () => {
+    resultsSection.style.display = 'none';
+    scoreSummary.innerHTML = '';
+    keywordSummary.innerHTML = '';
+    recommendationsBox.innerHTML = '';
+};
+
+const renderRecommendations = (items) => {
+    if (!items || items.length === 0) {
+        recommendationsBox.innerHTML = '<p class="note">暂无匹配的期刊推荐。</p>';
+        return;
+    }
+    const rows = items.map((item) => {
+        const mark = item.reference_mark ? item.reference_mark : '—';
+        return `<tr><td>${item.journal_name}</td><td>${mark}</td><td>${item.match_score.toFixed(1)}` +
+               `</td><td>${item.adjusted_threshold.toFixed(2)}</td><td>${item.low_bound.toFixed(2)}</td></tr>`;
+    }).join('');
+    recommendationsBox.innerHTML = `
+        <h3>期刊推荐</h3>
+        <table>
+            <thead><tr><th>期刊</th><th>参考标记</th><th>匹配得分</th><th>调整后阈值</th><th>原始阈值</th></tr></thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+};
+
+const renderKeywords = (main, peripherals) => {
+    const mainText = main ? `<strong>主要主题：</strong> ${main}` : '<strong>主要主题：</strong> 未识别';
+    const peripheralText = peripherals && peripherals.length > 0 ? peripherals.join('，') : '无';
+    keywordSummary.innerHTML = `
+        <h3>主题分析</h3>
+        <p>${mainText}</p>
+        <p><strong>相关主题：</strong> ${peripheralText}</p>
+    `;
+};
+
+const renderScore = (data) => {
+    if (typeof data.iqm_score !== 'number') {
+        scoreSummary.innerHTML = '<p class="note">尚未产生评分。</p>';
+        return;
+    }
+    const attempts = data.attempts_run ?? 0;
+    const valid = data.valid_runs ?? 0;
+    const justification = data.justification ? `<p><strong>模型说明：</strong> ${data.justification}</p>` : '';
+    const decision = data.decision_reason ? `<p class="note">${data.decision_reason}</p>` : '';
+    scoreSummary.innerHTML = `
+        <h3>综合评分</h3>
+        <p><strong>IQM 评分：</strong> ${data.iqm_score.toFixed(1)}</p>
+        <p class="note">有效结果 ${valid} 次，共尝试 ${attempts} 次。</p>
+        ${justification}
+        ${decision}
+    `;
+};
+
+const updateStatus = (payload) => {
+    statusBox.textContent = payload;
+};
+
+const handleStatusPayload = (payload) => {
+    updateStatus(payload.status_detail || `当前状态：${payload.status}`);
+
+    if (payload.status === 'completed') {
+        renderScore(payload);
+        renderKeywords(payload.keyword_main, payload.keyword_peripherals);
+        renderRecommendations(payload.recommendations);
+        resultsSection.style.display = 'block';
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    } else if (payload.status === 'failed') {
+        const message = payload.error_message || '评估失败，请稍后重试。';
+        statusBox.textContent = message;
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+};
+
+const pollJob = (url) => {
+    pollTimer = setInterval(async () => {
+        try {
+            const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+            if (!res.ok) {
+                throw new Error('状态查询失败');
+            }
+            const data = await res.json();
+            handleStatusPayload(data);
+            if (data.status === 'completed' || data.status === 'failed') {
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }
+        } catch (err) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+            updateStatus('轮询失败：' + err.message);
+        }
+    }, 3000);
+};
+
+const handleFileSelection = () => {
+    if (!fileInput || fileInput.files.length === 0) {
+        updateStatus('等待上传。');
+        return;
+    }
+    updateStatus(`已选择文件：${fileInput.files[0].name}`);
+};
+
+if (fileInput) {
+    fileInput.addEventListener('change', handleFileSelection);
+}
+
+form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!fileInput.files || fileInput.files.length === 0) {
+        updateStatus('请先选择文件。');
+        return;
+    }
+    resetResults();
+    updateStatus('正在上传稿件...');
+    const formData = new FormData(form);
+
+    try {
+        const res = await fetch('/tools/grader/jobs', { method: 'POST', body: formData });
+        if (!res.ok) {
+            const errorBody = await res.json().catch(() => ({ message: '提交失败' }));
+            updateStatus(errorBody.message || '提交失败');
+            return;
+        }
+        const data = await res.json();
+        handleStatusPayload(data);
+        if (fileInput) {
+            fileInput.value = '';
+            fileInput.dispatchEvent(new Event('change'));
+        }
+        if (data.status_url) {
+            pollJob(data.status_url);
+        }
+    } catch (err) {
+        updateStatus('提交失败：' + err.message);
+    }
+});
+"#;
+
+    let html = render_tool_page(ToolPageLayout {
+        meta_title: "稿件评估与期刊推荐 | 张圆教授课题组 AI 工具箱",
+        page_heading: "稿件评估与期刊推荐",
+        username: &username,
+        note_html: Cow::Owned(note_html),
+        tab_group: "grader",
+        new_tab_label: "新任务",
+        new_tab_html: Cow::Owned(new_tab_html),
+        history_tab_label: "历史记录",
+        history_panel_html: Cow::Owned(history_panel),
+        admin_link,
+        footer_html: Cow::Owned(render_footer()),
+        extra_style_blocks: vec![
+            Cow::Borrowed(history_ui::HISTORY_STYLES),
+            Cow::Borrowed(UPLOAD_WIDGET_STYLES),
+            extra_styles,
+        ],
+        body_scripts: vec![
+            Cow::Borrowed(UPLOAD_WIDGET_SCRIPT),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                grader_script
+            )),
+            Cow::Owned(format!(
+                "<script>
+{}
+</script>",
+                history_ui::HISTORY_SCRIPT
+            )),
+        ],
+    });
 
     Ok(Html(html))
 }
