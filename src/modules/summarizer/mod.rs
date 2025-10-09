@@ -27,6 +27,7 @@ use zip::ZipArchive;
 
 mod admin;
 
+use crate::web::history_ui;
 use crate::web::{
     FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
     process_upload_form, render_upload_widget,
@@ -34,7 +35,7 @@ use crate::web::{
 use crate::{
     AppState, GlossaryTermRow,
     config::SummarizerPrompts,
-    escape_html, fetch_glossary_terms,
+    escape_html, fetch_glossary_terms, history,
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_SUMMARIZER},
@@ -92,6 +93,9 @@ async fn summarizer_page(
             .with_accept(".pdf,.docx,.txt"),
     );
     let upload_script = UPLOAD_WIDGET_SCRIPT;
+    let history_styles = history_ui::HISTORY_STYLES;
+    let history_panel = history_ui::render_history_panel(MODULE_SUMMARIZER);
+    let history_script = history_ui::HISTORY_SCRIPT;
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -128,6 +132,7 @@ async fn summarizer_page(
         .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
         .downloads a:hover {{ text-decoration: underline; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        {history_styles}
         @media (max-width: 768px) {{
             header {{ padding: 1.5rem 1rem; }}
             main {{ padding: 1.5rem 1rem; }}
@@ -150,24 +155,35 @@ async fn summarizer_page(
         <p class="note">当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 文件生成结构化摘要，并可输出中文译文。</p>
     </header>
     <main>
-        <section class="panel">
-            <h2>发起新任务</h2>
-            <form id="summarizer-form">
-                {upload_widget}
-                <label for="document-type">文档类型</label>
-                <select id="document-type" name="document_type">
-                    <option value="research">科研论文</option>
-                    <option value="other">其他文档</option>
-                </select>
-                <label><input type="checkbox" name="translate" id="translate" checked> 生成中文译文</label>
-                <button type="submit">开始处理</button>
-            </form>
-            <div id="submission-status" class="status"></div>
-        </section>
-        <section class="panel jobs-list">
-            <h2>任务进度</h2>
-            <div id="job-status"></div>
-        </section>
+        <div class="tool-tabs" data-tab-group="summarizer">
+            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
+            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
+        </div>
+        <div class="tab-container" data-tab-container="summarizer">
+            <div class="tab-section active" data-tab-panel="new">
+                <section class="panel">
+                    <h2>发起新任务</h2>
+                    <form id="summarizer-form">
+                        {upload_widget}
+                        <label for="document-type">文档类型</label>
+                        <select id="document-type" name="document_type">
+                            <option value="research">科研论文</option>
+                            <option value="other">其他文档</option>
+                        </select>
+                        <label><input type="checkbox" name="translate" id="translate" checked> 生成中文译文</label>
+                        <button type="submit">开始处理</button>
+                    </form>
+                    <div id="submission-status" class="status"></div>
+                </section>
+                <section class="panel jobs-list">
+                    <h2>任务进度</h2>
+                    <div id="job-status"></div>
+                </section>
+            </div>
+            <div class="tab-section" data-tab-panel="history">
+                {history_panel}
+            </div>
+        </div>
         {footer}
     </main>
     {upload_script}
@@ -290,11 +306,17 @@ async fn summarizer_page(
             `;
         }}
     </script>
+    <script>
+{history_script}
+    </script>
 </body>
 </html>"#,
         upload_styles = upload_styles,
         upload_widget = upload_widget,
         upload_script = upload_script,
+        history_styles = history_styles,
+        history_panel = history_panel,
+        history_script = history_script,
         username = escape_html(&user.username),
         completed = STATUS_COMPLETED,
         failed = STATUS_FAILED,
@@ -399,6 +421,12 @@ async fn create_job(
         .await
         .map_err(|err| internal_error(err.into()))?;
 
+    if let Err(err) =
+        history::record_job_start(&pool, MODULE_SUMMARIZER, user.id, job_id.to_string()).await
+    {
+        error!(?err, %job_id, "failed to record summarizer job history");
+    }
+
     spawn_job_worker(state.clone(), job_id);
 
     Ok(Json(JobSubmissionResponse {
@@ -489,7 +517,7 @@ async fn download_combined_output(
     let pool = state.pool();
 
     let job = sqlx::query_as::<_, CombinedJobRecord>(
-        "SELECT user_id, combined_summary_path, combined_translation_path FROM summary_jobs WHERE id = $1",
+        "SELECT user_id, combined_summary_path, combined_translation_path, files_purged_at FROM summary_jobs WHERE id = $1",
     )
     .bind(job_id)
     .fetch_optional(&pool)
@@ -506,6 +534,13 @@ async fn download_combined_output(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError::new("您无权访问该任务。")),
+        ));
+    }
+
+    if job.files_purged_at.is_some() {
+        return Err((
+            StatusCode::GONE,
+            Json(ApiError::new("该任务的下载文件已过期并被清除。")),
         ));
     }
 
@@ -1342,6 +1377,7 @@ struct CombinedJobRecord {
     user_id: Uuid,
     combined_summary_path: Option<String>,
     combined_translation_path: Option<String>,
+    files_purged_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Serialize)]

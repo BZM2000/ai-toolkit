@@ -1,0 +1,245 @@
+.tool-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+}
+
+.tool-tabs .tab-toggle {
+    border: 1px solid #bfdbfe;
+    background: #e0f2fe;
+    color: #1d4ed8;
+    border-radius: 999px;
+    padding: 0.5rem 1.25rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, border 0.15s ease, color 0.15s ease;
+}
+
+.tool-tabs .tab-toggle:hover {
+    background: #bfdbfe;
+    border-color: #93c5fd;
+}
+
+.tool-tabs .tab-toggle.active {
+    background: #2563eb;
+    border-color: #1d4ed8;
+    color: #ffffff;
+}
+
+.tab-container {
+    width: 100%;
+}
+
+.tab-section {
+    display: none;
+    width: 100%;
+}
+
+.tab-section.active {
+    display: block;
+}
+
+.history-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.history-panel .note {
+    color: #64748b;
+    font-size: 0.95rem;
+    margin: 0;
+}
+
+.history-table-wrapper {
+    width: 100%;
+    overflow-x: auto;
+}
+
+.history-table {
+    width: 100%;
+    border-collapse: collapse;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #ffffff;
+}
+
+.history-table thead th {
+    background: #f1f5f9;
+    color: #0f172a;
+    text-align: left;
+    padding: 0.75rem 1rem;
+    font-size: 0.9rem;
+}
+
+.history-table tbody td {
+    border-top: 1px solid #e2e8f0;
+    padding: 0.85rem 1rem;
+    vertical-align: top;
+    font-size: 0.9rem;
+}
+
+.history-table tbody tr.history-empty-row td {
+    text-align: center;
+    color: #94a3b8;
+    font-style: italic;
+}
+
+.history-job-title {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.history-job-title .job-name {
+    font-weight: 600;
+    color: #0f172a;
+}
+
+.history-job-title .job-meta {
+    color: #64748b;
+    font-size: 0.85rem;
+}
+
+.history-job-title .job-warning {
+    color: #b91c1c;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.25rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: none;
+    margin-right: 0.35rem;
+}
+
+.status-badge.status-pending {
+    background: #fef9c3;
+    color: #854d0e;
+}
+
+.status-badge.status-processing {
+    background: #e0f2fe;
+    color: #1d4ed8;
+}
+
+.status-badge.status-completed {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.status-badge.status-failed {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.status-badge.status-expired {
+    background: #ede9fe;
+    color: #5b21b6;
+}
+
+.history-status-detail {
+    margin-top: 0.35rem;
+    color: #64748b;
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+.history-actions button {
+    border: 1px solid #bfdbfe;
+    background: #2563eb;
+    color: #ffffff;
+    font-weight: 600;
+    border-radius: 8px;
+    padding: 0.45rem 0.9rem;
+    cursor: pointer;
+    transition: background 0.15s ease, border 0.15s ease;
+}
+
+.history-actions button:hover {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+}
+
+.history-actions button:disabled {
+    background: #e2e8f0;
+    border-color: #cbd5f5;
+    color: #94a3b8;
+    cursor: not-allowed;
+}
+
+.history-detail-row {
+    display: none;
+    background: #f8fafc;
+}
+
+.history-detail-row.active {
+    display: table-row;
+}
+
+.history-detail {
+    padding: 1rem 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.history-detail h3 {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.history-downloads {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.history-downloads a {
+    color: #2563eb;
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.history-downloads a:hover {
+    text-decoration: underline;
+}
+
+.history-detail pre {
+    background: #0f172a;
+    color: #f8fafc;
+    padding: 0.75rem;
+    border-radius: 8px;
+    max-height: 320px;
+    overflow: auto;
+    font-size: 0.8rem;
+}
+
+@media (max-width: 720px) {
+    .history-table thead {
+        display: none;
+    }
+
+    .history-table tbody td {
+        display: block;
+        border-top: none;
+        border-bottom: 1px solid #e2e8f0;
+        padding: 0.75rem 0.5rem;
+    }
+
+    .history-table tbody tr {
+        border-bottom: 1px solid #e2e8f0;
+    }
+
+    .history-actions {
+        display: flex;
+        justify-content: flex-end;
+    }
+}

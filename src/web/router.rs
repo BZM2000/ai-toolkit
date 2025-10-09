@@ -7,7 +7,7 @@ use axum::{
 
 use crate::{
     modules,
-    web::{AppState, admin, auth, landing},
+    web::{AppState, admin, auth, history, landing},
 };
 
 const ROBOTS_TXT_BODY: &str = include_str!("../../robots.txt");
@@ -15,6 +15,7 @@ const ROBOTS_TXT_BODY: &str = include_str!("../../robots.txt");
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(landing::landing_page))
+        .route("/jobs", get(history::jobs_page))
         .route("/login", get(auth::login_page).post(auth::process_login))
         .route("/logout", post(auth::logout))
         .route("/robots.txt", get(robots_txt))
@@ -51,6 +52,7 @@ pub fn build_router(state: AppState) -> Router {
             "/dashboard/journal-references/delete",
             post(admin::delete_journal_reference),
         )
+        .route("/api/history", get(history::recent_history))
         .merge(modules::summarizer::router())
         .merge(modules::translatedocx::router())
         .merge(modules::grader::router())

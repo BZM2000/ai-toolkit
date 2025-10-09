@@ -1,5 +1,7 @@
 mod config;
+mod history;
 pub mod llm;
+mod maintenance;
 mod modules;
 mod usage;
 mod utils;
@@ -33,6 +35,8 @@ async fn main() {
 async fn app_main() -> Result<()> {
     let state = AppState::new().await?;
     state.ensure_seed_admin().await?;
+
+    maintenance::spawn(state.clone());
 
     let app = web::router::build_router(state);
 

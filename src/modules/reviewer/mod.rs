@@ -12,6 +12,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
+use chrono::Utc;
 use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -21,12 +22,13 @@ use uuid::Uuid;
 
 mod admin;
 
+use crate::web::history_ui;
 use crate::web::{
     FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
     process_upload_form, render_upload_widget,
 };
 use crate::{
-    AppState, SESSION_COOKIE, escape_html,
+    AppState, SESSION_COOKIE, escape_html, history,
     llm::{AttachmentKind, ChatMessage, FileAttachment, LlmClient, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_REVIEWER},
@@ -74,6 +76,7 @@ struct JobRow {
     user_id: Uuid,
     status: String,
     status_detail: Option<String>,
+    files_purged_at: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Serialize)]
@@ -147,6 +150,9 @@ async fn reviewer_page(
         .with_accept(".pdf,.docx"),
     );
     let upload_script = UPLOAD_WIDGET_SCRIPT;
+    let history_styles = history_ui::HISTORY_STYLES;
+    let history_panel = history_ui::render_history_panel(MODULE_REVIEWER);
+    let history_script = history_ui::HISTORY_SCRIPT;
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -190,6 +196,7 @@ async fn reviewer_page(
         .downloads a {{ color: #2563eb; text-decoration: none; font-weight: 600; }}
         .downloads a:hover {{ text-decoration: underline; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        {history_styles}
         @media (max-width: 768px) {{
             header {{ padding: 1.5rem 1rem; }}
             main {{ padding: 1.5rem 1rem; }}
@@ -211,23 +218,34 @@ async fn reviewer_page(
         <p class="note">当前登录：<strong>{username}</strong>。上传稿件后，系统将自动执行三轮审稿，生成可下载的 DOCX 报告。</p>
     </header>
     <main>
-        <section class="panel">
-            <h2>提交稿件</h2>
-            <form id="reviewer-form">
-                {upload_widget}
-                <label for="language">审稿语言</label>
-                <select id="language" name="language">
-                    <option value="english">英文</option>
-                    <option value="chinese">中文</option>
-                </select>
-                <button type="submit">开始审稿</button>
-            </form>
-            <div id="submission-status" class="status-box">等待上传。</div>
-        </section>
-        <section class="panel">
-            <h2>任务进度</h2>
-            <div id="job-status"></div>
-        </section>
+        <div class="tool-tabs" data-tab-group="reviewer">
+            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
+            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
+        </div>
+        <div class="tab-container" data-tab-container="reviewer">
+            <div class="tab-section active" data-tab-panel="new">
+                <section class="panel">
+                    <h2>提交稿件</h2>
+                    <form id="reviewer-form">
+                        {upload_widget}
+                        <label for="language">审稿语言</label>
+                        <select id="language" name="language">
+                            <option value="english">英文</option>
+                            <option value="chinese">中文</option>
+                        </select>
+                        <button type="submit">开始审稿</button>
+                    </form>
+                    <div id="submission-status" class="status-box">等待上传。</div>
+                </section>
+                <section class="panel">
+                    <h2>任务进度</h2>
+                    <div id="job-status"></div>
+                </section>
+            </div>
+            <div class="tab-section" data-tab-panel="history">
+                {history_panel}
+            </div>
+        </div>
         {footer}
     </main>
     {upload_script}
@@ -362,11 +380,17 @@ async fn reviewer_page(
             }}
         }});
     </script>
+    <script>
+{history_script}
+    </script>
 </body>
 </html>"#,
         upload_styles = upload_styles,
         upload_widget = upload_widget,
         upload_script = upload_script,
+        history_styles = history_styles,
+        history_panel = history_panel,
+        history_script = history_script,
         admin_link = admin_link,
         username = username,
         footer = footer,
@@ -487,6 +511,12 @@ async fn create_job(
             .into_response()
     })?;
 
+    if let Err(err) =
+        history::record_job_start(&pool, MODULE_REVIEWER, user.id, job_id.to_string()).await
+    {
+        error!(?err, job_id, "failed to record reviewer job history");
+    }
+
     let language_clone = language.clone();
     let ext_clone = ext.clone();
     tokio::spawn(async move {
@@ -526,7 +556,7 @@ async fn job_status(
     let user = require_user(&state, &jar).await?;
 
     let job = sqlx::query_as::<_, JobRow>(
-        "SELECT user_id, status, status_detail
+        "SELECT user_id, status, status_detail, files_purged_at
          FROM reviewer_jobs WHERE job_id = $1",
     )
     .bind(job_id)
@@ -540,6 +570,10 @@ async fn job_status(
 
     if job.user_id != user.id && !user.is_admin {
         return Err((StatusCode::FORBIDDEN, "Access denied").into_response());
+    }
+
+    if job.files_purged_at.is_some() {
+        return Err((StatusCode::GONE, "审稿文件已过期并被清除。").into_response());
     }
 
     // Fetch review documents
@@ -651,7 +685,7 @@ async fn download_review(
     let user = require_user(&state, &jar).await?;
 
     let job = sqlx::query_as::<_, JobRow>(
-        "SELECT user_id, status, status_detail
+        "SELECT user_id, status, status_detail, files_purged_at
          FROM reviewer_jobs WHERE job_id = $1",
     )
     .bind(job_id)
@@ -665,6 +699,10 @@ async fn download_review(
 
     if job.user_id != user.id && !user.is_admin {
         return Err((StatusCode::FORBIDDEN, "Access denied").into_response());
+    }
+
+    if job.files_purged_at.is_some() {
+        return Err((StatusCode::GONE, "审稿文件已过期并被清除。").into_response());
     }
 
     #[derive(sqlx::FromRow)]

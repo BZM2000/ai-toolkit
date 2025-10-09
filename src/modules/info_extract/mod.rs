@@ -15,6 +15,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use calamine::{DataType, Reader, Xlsx};
+use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use pdf_extract::extract_text as extract_pdf_text;
 use rust_xlsxwriter::Workbook;
@@ -26,6 +27,7 @@ use uuid::Uuid;
 
 mod admin;
 
+use crate::web::history_ui;
 use crate::web::{
     FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
     process_upload_form, render_upload_widget,
@@ -33,7 +35,7 @@ use crate::web::{
 use crate::{
     AppState, SESSION_COOKIE,
     config::{InfoExtractModels, InfoExtractPrompts},
-    escape_html,
+    escape_html, history,
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_INFO_EXTRACT},
@@ -147,6 +149,7 @@ struct DocumentSourceRecord {
 struct DownloadRecord {
     user_id: Uuid,
     result_path: Option<String>,
+    files_purged_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +223,9 @@ async fn info_extract_page(
             .with_accept(".xlsx"),
     );
     let upload_script = UPLOAD_WIDGET_SCRIPT;
+    let history_styles = history_ui::HISTORY_STYLES;
+    let history_panel = history_ui::render_history_panel(MODULE_INFO_EXTRACT);
+    let history_script = history_ui::HISTORY_SCRIPT;
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -260,6 +266,7 @@ async fn info_extract_page(
         .downloads a {{ color: #2563eb; text-decoration: none; font-weight: 600; }}
         .downloads a:hover {{ text-decoration: underline; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        {history_styles}
         @media (max-width: 768px) {{
             header {{ padding: 1.5rem 1rem; }}
             main {{ padding: 1.5rem 1rem; }}
@@ -280,20 +287,31 @@ async fn info_extract_page(
         <p class="note">当前登录：<strong>{username}</strong>。上传最多 100 篇 PDF 论文与字段定义表（XLSX），系统将批量抽取自定义信息并生成汇总表。</p>
     </header>
     <main>
-        <section class="panel">
-            <h2>发起新任务</h2>
-            <form id="infoextract-form">
-                {docs_widget}
-                {spec_widget}
-                <button type="submit">开始处理</button>
-            </form>
-            <div id="form-status" class="status"></div>
-            <p class="note" style="margin-top:0.75rem;">字段定义表说明：第 1 行名称，第 2 行说明，第 3 行示例（分号分隔），第 4 行枚举（分号分隔）。示例与枚举不可同时填写。</p>
-        </section>
-        <section class="panel">
-            <h2>任务进度</h2>
-            <div id="job-status"></div>
-        </section>
+        <div class="tool-tabs" data-tab-group="info_extract">
+            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
+            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
+        </div>
+        <div class="tab-container" data-tab-container="info_extract">
+            <div class="tab-section active" data-tab-panel="new">
+                <section class="panel">
+                    <h2>发起新任务</h2>
+                    <form id="infoextract-form">
+                        {docs_widget}
+                        {spec_widget}
+                        <button type="submit">开始处理</button>
+                    </form>
+                    <div id="form-status" class="status"></div>
+                    <p class="note" style="margin-top:0.75rem;">字段定义表说明：第 1 行名称，第 2 行说明，第 3 行示例（分号分隔），第 4 行枚举（分号分隔）。示例与枚举不可同时填写。</p>
+                </section>
+                <section class="panel">
+                    <h2>任务进度</h2>
+                    <div id="job-status"></div>
+                </section>
+            </div>
+            <div class="tab-section" data-tab-panel="history">
+                {history_panel}
+            </div>
+        </div>
         {footer}
     </main>
     {upload_script}
@@ -436,12 +454,18 @@ async fn info_extract_page(
             }}
         }});
     </script>
+    <script>
+{history_script}
+    </script>
 </body>
 </html>"#,
         upload_styles = upload_styles,
         docs_widget = docs_widget,
         spec_widget = spec_widget,
         upload_script = upload_script,
+        history_styles = history_styles,
+        history_panel = history_panel,
+        history_script = history_script,
         admin_link = admin_link,
         username = username,
         footer = footer,
@@ -589,6 +613,12 @@ async fn create_job(
         .await
         .map_err(|err| internal_error(err.into()))?;
 
+    if let Err(err) =
+        history::record_job_start(&pool, MODULE_INFO_EXTRACT, user.id, job_id.to_string()).await
+    {
+        error!(?err, %job_id, "failed to record info extract job history");
+    }
+
     spawn_job_worker(state.clone(), job_id, fields);
 
     Ok(Json(JobSubmissionResponse {
@@ -683,7 +713,7 @@ async fn download_result(
 
     let pool = state.pool();
     let record = sqlx::query_as::<_, DownloadRecord>(
-        "SELECT user_id, result_path FROM info_extract_jobs WHERE id = $1",
+        "SELECT user_id, result_path, files_purged_at FROM info_extract_jobs WHERE id = $1",
     )
     .bind(job_id)
     .fetch_optional(&pool)
@@ -700,6 +730,13 @@ async fn download_result(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError::new("您无权下载该任务的结果。")),
+        ));
+    }
+
+    if record.files_purged_at.is_some() {
+        return Err((
+            StatusCode::GONE,
+            Json(ApiError::new("结果文件已过期并被清除。")),
         ));
     }
 

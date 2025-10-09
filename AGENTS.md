@@ -49,11 +49,12 @@
 
 ### Adding a New Tool Module (quick guide)
 1. **Module skeleton**: create `src/modules/<tool>/mod.rs` with a `Router<AppState>` builder (`pub fn router() -> Router<AppState>`) exposing `/tools/<tool>` and any `/api/<tool>` endpoints. Follow the structure used by summarizer/translatedocx/grader (shared auth guards live in `web::auth`).
-2. **State/utilities**: use helpers from `AppState` (`state.pool()`/`state.llm_client()`) and shared usage accounting (`crate::usage`). Place module-specific SQL tables/migrations under `migrations/` with incremental numbering.
+2. **State/utilities**: use helpers from `AppState` (`state.pool()`/`state.llm_client()`) and shared usage accounting (`crate::usage`). Place module-specific SQL tables/migrations under `migrations/` with incremental numbering—include a `files_purged_at TIMESTAMPTZ` column on your job table for retention bookkeeping.
 3. **Configuration**: extend `ModuleSettings` in `src/config.rs` if the tool needs persisted model/prompt data. Seed defaults in `ensure_defaults`, update admin forms, and persist edits via new DB columns.
 4. **Admin UI wiring**: add a `modules::<tool>::admin` module to serve settings pages, wire its routes from the tool router, and reuse shared HTML helpers (`modules::admin_shared::MODULE_ADMIN_SHARED_STYLES`). POST handlers should call `state.reload_settings()` after writes.
 5. **Usage metering**: register the module in `src/usage.rs` (`REGISTERED_MODULES`) with proper unit/token labels and incorporate limit checks in the module’s request path.
-6. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool and add docs/tests as necessary.
+6. **History & retention hooks**: after inserting a new job, call `history::record_job_start(&pool, MODULE_<TOOL>, user_id, job_id)` so it appears in `/api/history` and the shared panels. Expose status/download endpoints that tolerate missing files and blow away stored paths once `files_purged_at` is set. Reuse `history_ui::render_history_panel` (plus shared JS/CSS) on the tool page so users can revisit past runs.
+7. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool, consider adding a `/jobs` panel card if it requires special messaging, and add docs/tests as necessary.
 
 ## Shared LLM Utility
 - Module: `src/llm/mod.rs` exposes the reusable `LlmClient` plus request/response types.
@@ -114,8 +115,7 @@
 - Authenticated users can upload up to 10 `.pdf`, `.docx`, or `.txt` files per job, select document type, and toggle translation; background worker writes outputs to `storage/summarizer/<job_id>/`.
 - Progress and downloads:
   - `POST /tools/summarizer/jobs` → returns `job_id`.
-  - `GET /api/summarizer/jobs/{job_id}` → JSON status (per-document links, combined outputs, error info).
-  - `GET /api/summarizer/jobs/{job_id}/documents/{doc_id}/download/{summary|translation}` → authenticated file stream.
+  - `GET /api/summarizer/jobs/{job_id}` → JSON status (per-document progress, combined outputs, error info).
   - `GET /api/summarizer/jobs/{job_id}/combined/{summary|translation}` → combined text downloads.
 - Glossary terms are now persisted in `glossary_terms` as EN -> CN pairs; admins manage them from the dashboard, and translation prompts incorporate the local glossary (no external fetch).
 - Usage accounting: `users.usage_count` increments by successfully processed documents; request is rejected if projected usage would exceed `usage_limit`.
@@ -168,7 +168,7 @@
 
 ## File System
 - Runtime artifacts persist under `storage/summarizer/`, `storage/infoextract/`, `storage/translatedocx/`, `storage/grader/`, and `storage/reviewer/`; `.gitignore` ignores the entire `storage/` directory.
-- Summarizer job directories contain `summary_n.txt`, optional `translation_n.txt`, and combined outputs with Markdown-style headings.
+- Summarizer job directories persist only combined outputs (`combined_summary.txt`, optional `combined_translation.txt`) with Markdown-style headings.
 - Info Extract job directories cache the uploaded PDFs, the validated XLSX schema, and the generated `extraction_result.xlsx` workbook.
 - Reviewer job directories contain DOCX files: `round1_review_{1-8}.docx`, `round2_meta_review.docx`, and `round3_final_report.docx`.
 
@@ -225,3 +225,10 @@
   - 前端采用两个 `render_upload_widget`，脚本保留轮询逻辑但移除自定义拖拽 UI。
   - 服务端改用 `process_upload_form`/`FileFieldConfig` 统一校验与存储，清理手写 multipart 循环。
   - 前端页面统一引用 `render_upload_widget` 与共享脚本，移除自定义拖拽样式/逻辑。
+- 2025-10-11 (Codex agent): 实现 24 小时任务历史与存储清理机制。
+  - 新增迁移 `0013_history_and_retention.sql` 引入 `user_job_history` 并为五个模块的任务记录添加 `files_purged_at` 标记。
+  - 构建共享历史服务：任务提交即调用 `record_job_start`，`fetch_recent_jobs` 聚合状态，`/api/history` 对外提供统一 JSON。
+  - 新增 `history_ui`（共享样式 + JS），在各工具页加入“历史记录”页签，同时上线 `/jobs` 汇总页与首页导航卡片。
+  - 编写 `maintenance::spawn` 定时任务，24 小时后清理 `storage/*` 产物并清空下载路径；下载接口遇到过期资源返回 410 提示。
+  - 前端历史面板支持轮询、状态详情与下载链接，过期任务显示“结果已清除”并禁用下载按钮。
+  - 各模块作业创建后统一记录历史，成功/失败队列与下载端点均反映清理状态，确保 24 小时后自动失效。

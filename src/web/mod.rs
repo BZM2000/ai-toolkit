@@ -2,6 +2,8 @@ pub mod admin;
 pub mod admin_utils;
 pub mod auth;
 pub mod data;
+pub mod history;
+pub mod history_ui;
 pub mod landing;
 pub mod models;
 pub mod router;

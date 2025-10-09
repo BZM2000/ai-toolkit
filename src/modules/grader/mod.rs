@@ -27,13 +27,14 @@ use zip::ZipArchive;
 
 mod admin;
 
+use crate::web::history_ui;
 use crate::web::{
     FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
     process_upload_form, render_upload_widget,
 };
 use crate::{
     AppState, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow, escape_html,
-    fetch_journal_references, fetch_journal_topic_scores, fetch_journal_topics,
+    fetch_journal_references, fetch_journal_topic_scores, fetch_journal_topics, history,
     llm::{ChatMessage, LlmClient, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_GRADER},
@@ -239,6 +240,9 @@ pub async fn grader_page(
             .with_accept(".pdf,.docx,.txt"),
     );
     let upload_script = UPLOAD_WIDGET_SCRIPT;
+    let history_styles = history_ui::HISTORY_STYLES;
+    let history_panel = history_ui::render_history_panel(MODULE_GRADER);
+    let history_script = history_ui::HISTORY_SCRIPT;
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -272,6 +276,7 @@ pub async fn grader_page(
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
         .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
         .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
+        {history_styles}
         {upload_styles}
     </style>
 </head>
@@ -287,20 +292,31 @@ pub async fn grader_page(
         <p class="note">当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 稿件，系统会估计投稿水平并推荐期刊。</p>
     </header>
     <main>
-        <section class="panel">
-            <h2>提交稿件</h2>
-            <form id="grader-form">
-                {upload_widget}
-                <button type="submit">开始评估</button>
-            </form>
-            <div id="status-box" class="status-box">等待上传。</div>
-        </section>
-        <section id="results-section" class="results" style="display:none;">
-            <h2>评估结果</h2>
-            <div id="score-summary"></div>
-            <div id="keyword-summary"></div>
-            <div id="recommendations"></div>
-        </section>
+        <div class="tool-tabs" data-tab-group="grader">
+            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
+            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
+        </div>
+        <div class="tab-container" data-tab-container="grader">
+            <div class="tab-section active" data-tab-panel="new">
+                <section class="panel">
+                    <h2>提交稿件</h2>
+                    <form id="grader-form">
+                        {upload_widget}
+                        <button type="submit">开始评估</button>
+                    </form>
+                    <div id="status-box" class="status-box">等待上传。</div>
+                </section>
+                <section id="results-section" class="results" style="display:none;">
+                    <h2>评估结果</h2>
+                    <div id="score-summary"></div>
+                    <div id="keyword-summary"></div>
+                    <div id="recommendations"></div>
+                </section>
+            </div>
+            <div class="tab-section" data-tab-panel="history">
+                {history_panel}
+            </div>
+        </div>
         {footer}
     </main>
     {upload_script}
@@ -458,11 +474,17 @@ pub async fn grader_page(
             }}
         }});
     </script>
+    <script>
+{history_script}
+    </script>
 </body>
 </html>"#,
         upload_styles = upload_styles,
         upload_widget = upload_widget,
         upload_script = upload_script,
+        history_styles = history_styles,
+        history_panel = history_panel,
+        history_script = history_script,
         username = escape_html(&user.username),
         footer = footer,
         admin_link = admin_link,
@@ -480,7 +502,9 @@ async fn create_job(
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
 
-    if let Err(err) = usage::ensure_within_limits(&state.pool(), user.id, MODULE_GRADER, 1).await {
+    let pool = state.pool();
+
+    if let Err(err) = usage::ensure_within_limits(&pool, user.id, MODULE_GRADER, 1).await {
         return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
     }
 
@@ -523,8 +547,7 @@ async fn create_job(
         .map(|ext| ext.eq_ignore_ascii_case("docx"))
         .unwrap_or(false);
 
-    let mut transaction = state
-        .pool()
+    let mut transaction = pool
         .begin()
         .await
         .map_err(|err| internal_error(err.into()))?;
@@ -554,6 +577,12 @@ async fn create_job(
         .commit()
         .await
         .map_err(|err| internal_error(err.into()))?;
+
+    if let Err(err) =
+        history::record_job_start(&pool, MODULE_GRADER, user.id, job_id.to_string()).await
+    {
+        error!(?err, %job_id, "failed to record grader job history");
+    }
 
     spawn_job_worker(state.clone(), job_id);
 

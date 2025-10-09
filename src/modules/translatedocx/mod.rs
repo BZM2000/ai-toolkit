@@ -25,6 +25,7 @@ use zip::ZipArchive;
 
 mod admin;
 
+use crate::web::history_ui;
 use crate::web::{
     FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
     process_upload_form, render_upload_widget,
@@ -32,7 +33,7 @@ use crate::web::{
 use crate::{
     AppState, GlossaryTermRow,
     config::DocxTranslatorPrompts,
-    escape_html, fetch_glossary_terms,
+    escape_html, fetch_glossary_terms, history,
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_TRANSLATE_DOCX},
@@ -124,6 +125,9 @@ async fn translatedocx_page(
             .with_accept(".docx"),
     );
     let upload_script = UPLOAD_WIDGET_SCRIPT;
+    let history_styles = history_ui::HISTORY_STYLES;
+    let history_panel = history_ui::render_history_panel(MODULE_TRANSLATE_DOCX);
+    let history_script = history_ui::HISTORY_SCRIPT;
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -159,6 +163,7 @@ async fn translatedocx_page(
         .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
         .downloads a:hover {{ text-decoration: underline; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        {history_styles}
         {upload_styles}
     </style>
 </head>
@@ -174,23 +179,34 @@ async fn translatedocx_page(
         <p class="note">当前登录：<strong>{username}</strong>。上传 DOCX 文件，按照术语表进行精准翻译。</p>
     </header>
     <main>
-        <section class="panel">
-            <h2>提交新任务</h2>
-            <form id="translator-form">
-                {upload_widget}
-                <label for="direction">翻译方向</label>
-                <select id="direction" name="direction">
-                    <option value="en_to_cn">英文 → 中文</option>
-                    <option value="cn_to_en">中文 → 英文</option>
-                </select>
-                <button type="submit">开始翻译</button>
-            </form>
-            <div id="submission-status" class="status"></div>
-        </section>
-        <section class="panel">
-            <h2>任务进度</h2>
-            <div id="job-status"></div>
-        </section>
+        <div class="tool-tabs" data-tab-group="translatedocx">
+            <button type="button" class="tab-toggle active" data-tab-target="new">新任务</button>
+            <button type="button" class="tab-toggle" data-tab-target="history">历史记录</button>
+        </div>
+        <div class="tab-container" data-tab-container="translatedocx">
+            <div class="tab-section active" data-tab-panel="new">
+                <section class="panel">
+                    <h2>提交新任务</h2>
+                    <form id="translator-form">
+                        {upload_widget}
+                        <label for="direction">翻译方向</label>
+                        <select id="direction" name="direction">
+                            <option value="en_to_cn">英文 → 中文</option>
+                            <option value="cn_to_en">中文 → 英文</option>
+                        </select>
+                        <button type="submit">开始翻译</button>
+                    </form>
+                    <div id="submission-status" class="status"></div>
+                </section>
+                <section class="panel">
+                    <h2>任务进度</h2>
+                    <div id="job-status"></div>
+                </section>
+            </div>
+            <div class="tab-section" data-tab-panel="history">
+                {history_panel}
+            </div>
+        </div>
         {footer}
     </main>
     {upload_script}
@@ -330,11 +346,17 @@ async fn translatedocx_page(
             `;
         }}
     </script>
+    <script>
+{history_script}
+    </script>
 </body>
 </html>"#,
         upload_styles = upload_styles,
         upload_widget = upload_widget,
         upload_script = upload_script,
+        history_styles = history_styles,
+        history_panel = history_panel,
+        history_script = history_script,
         username = escape_html(&user.username),
         completed = STATUS_COMPLETED,
         failed = STATUS_FAILED,
@@ -353,6 +375,8 @@ async fn create_job(
     let user = require_user(&state, &jar)
         .await
         .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
+
+    let pool = state.pool();
 
     ensure_storage_root()
         .await
@@ -390,15 +414,12 @@ async fn create_job(
         .first()
         .expect("at least one file guaranteed by process_upload_form");
 
-    if let Err(err) =
-        usage::ensure_within_limits(&state.pool(), user.id, MODULE_TRANSLATE_DOCX, 1).await
-    {
+    if let Err(err) = usage::ensure_within_limits(&pool, user.id, MODULE_TRANSLATE_DOCX, 1).await {
         let _ = tokio_fs::remove_dir_all(&job_dir).await;
         return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
     }
 
-    let mut transaction = state
-        .pool()
+    let mut transaction = pool
         .begin()
         .await
         .map_err(|err| internal_error(err.into()))?;
@@ -430,6 +451,12 @@ async fn create_job(
         .commit()
         .await
         .map_err(|err| internal_error(err.into()))?;
+
+    if let Err(err) =
+        history::record_job_start(&pool, MODULE_TRANSLATE_DOCX, user.id, job_id.to_string()).await
+    {
+        error!(?err, %job_id, "failed to record DOCX translator job history");
+    }
 
     spawn_job_worker(state.clone(), job_id);
 
@@ -530,7 +557,7 @@ async fn download_document_output(
 
     let pool = state.pool();
     let document = sqlx::query_as::<_, DocumentDownloadRecord>(
-        "SELECT j.user_id, d.original_filename, d.translated_path FROM docx_documents d INNER JOIN docx_jobs j ON j.id = d.job_id WHERE d.id = $1 AND d.job_id = $2",
+        "SELECT j.user_id, j.files_purged_at, d.original_filename, d.translated_path FROM docx_documents d INNER JOIN docx_jobs j ON j.id = d.job_id WHERE d.id = $1 AND d.job_id = $2",
     )
     .bind(document_id)
     .bind(job_id)
@@ -548,6 +575,13 @@ async fn download_document_output(
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError::new("You do not have access to this output.")),
+        ));
+    }
+
+    if document.files_purged_at.is_some() {
+        return Err((
+            StatusCode::GONE,
+            Json(ApiError::new("译文下载已过期并被清除。")),
         ));
     }
 
@@ -1352,6 +1386,7 @@ struct JobDocumentStatus {
 #[derive(sqlx::FromRow)]
 struct DocumentDownloadRecord {
     user_id: Uuid,
+    files_purged_at: Option<DateTime<Utc>>,
     original_filename: String,
     translated_path: Option<String>,
 }

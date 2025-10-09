@@ -1,0 +1,241 @@
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::StatusCode,
+    response::{Html, Redirect},
+};
+use axum_extra::extract::cookie::CookieJar;
+use chrono::Utc;
+use serde::Deserialize;
+use tracing::error;
+use uuid::Uuid;
+
+use crate::web::history_ui;
+use crate::{
+    SESSION_COOKIE, history,
+    web::{AppState, AuthUser, auth},
+};
+use crate::{escape_html, render_footer};
+
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    #[serde(default)]
+    module: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct ApiError {
+    message: String,
+}
+
+impl ApiError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct HistoryItem {
+    module: String,
+    module_label: String,
+    tool_path: String,
+    status_path: String,
+    job_key: String,
+    created_at: String,
+    updated_at: Option<String>,
+    status: Option<String>,
+    status_detail: Option<String>,
+    files_purged: bool,
+    supports_downloads: bool,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct HistoryResponse {
+    modules: Vec<history::ApiModuleDescriptor>,
+    jobs: Vec<HistoryItem>,
+    retention_seconds: u64,
+    generated_at: String,
+}
+
+pub async fn recent_history(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<HistoryResponse>, (StatusCode, Json<ApiError>)> {
+    let user = require_user(&state, &jar).await?;
+
+    if let Some(ref module) = query.module {
+        if history::module_metadata(module).is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new("未知模块标识。")),
+            ));
+        }
+    }
+
+    let limit = query.limit.unwrap_or(20);
+
+    let entries =
+        history::fetch_recent_jobs(&state.pool(), user.id, query.module.as_deref(), limit)
+            .await
+            .map_err(|err| {
+                error!(?err, user_id = %user.id, "failed to load history entries");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError::new("无法读取历史记录，请稍后再试。")),
+                )
+            })?;
+
+    let modules = history::modules()
+        .iter()
+        .map(history::ApiModuleDescriptor::from)
+        .collect::<Vec<_>>();
+
+    let jobs = entries
+        .into_iter()
+        .filter_map(|entry| {
+            let meta = history::module_metadata(&entry.module)?;
+            Some(HistoryItem {
+                module: entry.module.clone(),
+                module_label: meta.label.to_string(),
+                tool_path: meta.tool_path.to_string(),
+                status_path: format!("{}{}", meta.status_path_prefix, entry.job_key),
+                job_key: entry.job_key,
+                created_at: entry.created_at.to_rfc3339(),
+                updated_at: entry.updated_at.map(|ts| ts.to_rfc3339()),
+                status: entry.status,
+                status_detail: entry.status_detail,
+                files_purged: entry.files_purged,
+                supports_downloads: meta.supports_downloads,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let response = HistoryResponse {
+        modules,
+        jobs,
+        retention_seconds: history::retention_interval().as_secs(),
+        generated_at: Utc::now().to_rfc3339(),
+    };
+
+    Ok(Json(response))
+}
+
+pub async fn jobs_page(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> Result<Html<String>, Redirect> {
+    let user = ensure_user(&state, &jar).await?;
+    let username = escape_html(&user.username);
+    let footer = render_footer();
+
+    let panels = history::modules()
+        .iter()
+        .map(|module| history_ui::render_history_panel(module.key))
+        .collect::<String>();
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>任务历史 | 张圆教授课题组 AI 工具箱</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <style>
+        :root {{ color-scheme: light; }}
+        body {{ font-family: "Helvetica Neue", Arial, sans-serif; margin: 0; background: #f8fafc; color: #0f172a; min-height: 100vh; display: flex; flex-direction: column; }}
+        header {{ background: #ffffff; padding: clamp(1.8rem, 4vw, 2.5rem) clamp(1.5rem, 6vw, 3rem); border-bottom: 1px solid #e2e8f0; display: flex; flex-direction: column; gap: 0.6rem; }}
+        header h1 {{ margin: 0; font-size: clamp(1.75rem, 3vw, 2.2rem); }}
+        header p {{ margin: 0; color: #64748b; }}
+        .header-meta {{ display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; color: #475569; font-size: 0.95rem; }}
+        .header-meta a {{ color: #2563eb; text-decoration: none; font-weight: 600; }}
+        .header-meta a:hover {{ text-decoration: underline; }}
+        main {{ flex: 1; padding: clamp(1.5rem, 5vw, 3rem); max-width: 1100px; margin: 0 auto; width: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: 1.5rem; }}
+        .history-grid {{ display: grid; gap: 1.5rem; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }}
+        .history-grid .panel {{ height: 100%; }}
+        .app-footer {{ margin-top: 2rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        {history_styles}
+    </style>
+</head>
+<body>
+    <header>
+        <h1>任务历史</h1>
+        <p>查看各模块最近 24 小时内的任务进度与下载链接。</p>
+        <div class="header-meta">
+            <span>当前登录：<strong>{username}</strong></span>
+            <a href="/">返回首页</a>
+        </div>
+    </header>
+    <main>
+        <div class="history-grid">
+            {panels}
+        </div>
+        {footer}
+    </main>
+    <script>
+{history_script}
+    </script>
+</body>
+</html>"#,
+        username = username,
+        panels = panels,
+        footer = footer,
+        history_styles = history_ui::HISTORY_STYLES,
+        history_script = history_ui::HISTORY_SCRIPT,
+    );
+
+    Ok(Html(html))
+}
+
+async fn require_user(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<AuthUser, (StatusCode, Json<ApiError>)> {
+    let cookie = jar
+        .get(SESSION_COOKIE)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
+
+    let token = Uuid::parse_str(cookie.value()).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError::new("会话无效，请重新登录。")),
+        )
+    })?;
+
+    let pool = state.pool();
+    match auth::fetch_user_by_session(&pool, token).await {
+        Ok(Some(user)) => Ok(user),
+        Ok(None) => Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError::new("会话已过期，请重新登录。")),
+        )),
+        Err(err) => {
+            error!(?err, "failed to validate session for history endpoint");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::new("无法验证会话，请稍后再试。")),
+            ))
+        }
+    }
+}
+
+async fn ensure_user(state: &AppState, jar: &CookieJar) -> Result<AuthUser, Redirect> {
+    let cookie = jar
+        .get(SESSION_COOKIE)
+        .ok_or_else(|| Redirect::to("/login"))?;
+    let token = Uuid::parse_str(cookie.value()).map_err(|_| Redirect::to("/login"))?;
+    let pool = state.pool();
+    match auth::fetch_user_by_session(&pool, token).await {
+        Ok(Some(user)) => Ok(user),
+        Ok(None) => Err(Redirect::to("/login")),
+        Err(err) => {
+            error!(?err, "failed to validate session for history page");
+            Err(Redirect::to("/login"))
+        }
+    }
+}
