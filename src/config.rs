@@ -8,6 +8,7 @@ const MODULE_SUMMARIZER: &str = "summarizer";
 const MODULE_TRANSLATE_DOCX: &str = "translate_docx";
 const MODULE_GRADER: &str = "grader";
 const MODULE_REVIEWER: &str = "reviewer";
+const MODULE_INFO_EXTRACT: &str = "info_extract";
 const LEGACY_GRADER_PROMPT_PREFIX: &str = "You evaluate manuscripts in the domains";
 const PROTOTYPE_GRADER_PROMPT: &str = r#"You are tasked with grading manuscripts in the areas of urban soundscape, architectural acoustics, and healthy habitat. Six prestige levels of well-known journals are listed below for reference, but you do not need to consider manuscript fit to specific journals; these are to convey the relative prestige of each level. For each manuscript, provide your educated guess—expressed as a percentage—for the chance it would be sent out for external review at each of the six journal levels. In making your estimates, consider overall quality, scope breadth, methodological novelty, interest to readership, workload, quality of writing, methodological rigour, and whether the results fully support the claims. Some manuscripts you grade may already be published articles, but please evaluate them as if they are new, without regard to where they were actually published. Note each lower level should have a equal or higher chance than the previous level.
 *Level 1 - High-impact broad journals*
@@ -43,6 +44,7 @@ pub struct ModuleSettings {
     translate_docx: Option<DocxTranslatorSettings>,
     grader: Option<GraderSettings>,
     reviewer: Option<ReviewerSettings>,
+    info_extract: Option<InfoExtractSettings>,
 }
 
 impl ModuleSettings {
@@ -55,6 +57,8 @@ impl ModuleSettings {
         let grader_prompts = serde_json::to_value(default_grader_prompts())?;
         let reviewer_models = serde_json::to_value(default_reviewer_models())?;
         let reviewer_prompts = serde_json::to_value(default_reviewer_prompts())?;
+        let info_models = serde_json::to_value(default_info_extract_models())?;
+        let info_prompts = serde_json::to_value(default_info_extract_prompts())?;
 
         let insert_summarizer = sqlx::query(
             "INSERT INTO module_configs (module_name, models, prompts) VALUES ($1, $2, $3)
@@ -92,6 +96,15 @@ impl ModuleSettings {
         .bind(&reviewer_prompts)
         .execute(pool);
 
+        let insert_info = sqlx::query(
+            "INSERT INTO module_configs (module_name, models, prompts) VALUES ($1, $2, $3)
+             ON CONFLICT (module_name) DO NOTHING",
+        )
+        .bind(MODULE_INFO_EXTRACT)
+        .bind(&info_models)
+        .bind(&info_prompts)
+        .execute(pool);
+
         let legacy_like = format!("{LEGACY_GRADER_PROMPT_PREFIX}%");
         let update_grader_prompt = sqlx::query(
             "UPDATE module_configs SET prompts = $1, updated_at = NOW()
@@ -107,6 +120,7 @@ impl ModuleSettings {
             insert_docx,
             insert_grader,
             insert_reviewer,
+            insert_info,
             update_grader_prompt
         )?;
 
@@ -136,6 +150,10 @@ impl ModuleSettings {
                 MODULE_REVIEWER => {
                     settings.reviewer = Some(parse_reviewer_settings(row.models, row.prompts)?);
                 }
+                MODULE_INFO_EXTRACT => {
+                    settings.info_extract =
+                        Some(parse_info_extract_settings(row.models, row.prompts)?);
+                }
                 other => {
                     return Err(anyhow!("unknown module configuration found: {}", other));
                 }
@@ -159,6 +177,10 @@ impl ModuleSettings {
 
     pub fn reviewer(&self) -> Option<&ReviewerSettings> {
         self.reviewer.as_ref()
+    }
+
+    pub fn info_extract(&self) -> Option<&InfoExtractSettings> {
+        self.info_extract.as_ref()
     }
 }
 
@@ -221,6 +243,44 @@ pub struct DocxTranslatorPrompts {
 impl Default for DocxTranslatorPrompts {
     fn default() -> Self {
         default_docx_prompts()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct InfoExtractSettings {
+    pub models: InfoExtractModels,
+    pub prompts: InfoExtractPrompts,
+}
+
+impl Default for InfoExtractSettings {
+    fn default() -> Self {
+        Self {
+            models: default_info_extract_models(),
+            prompts: default_info_extract_prompts(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InfoExtractModels {
+    pub extraction_model: String,
+}
+
+impl Default for InfoExtractModels {
+    fn default() -> Self {
+        default_info_extract_models()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InfoExtractPrompts {
+    pub system_prompt: String,
+    pub response_guidance: String,
+}
+
+impl Default for InfoExtractPrompts {
+    fn default() -> Self {
+        default_info_extract_prompts()
     }
 }
 
@@ -335,6 +395,14 @@ fn parse_reviewer_settings(models: Value, prompts: Value) -> Result<ReviewerSett
     Ok(ReviewerSettings { models, prompts })
 }
 
+fn parse_info_extract_settings(models: Value, prompts: Value) -> Result<InfoExtractSettings> {
+    let models: InfoExtractModels = serde_json::from_value(models)
+        .map_err(|err| anyhow!("failed to parse info extract models: {err}"))?;
+    let prompts: InfoExtractPrompts = serde_json::from_value(prompts)
+        .map_err(|err| anyhow!("failed to parse info extract prompts: {err}"))?;
+    Ok(InfoExtractSettings { models, prompts })
+}
+
 fn default_summarizer_models() -> SummarizerModels {
     SummarizerModels {
         summary_model: "openrouter/anthropic/claude-3-haiku".to_string(),
@@ -360,6 +428,19 @@ fn default_docx_prompts() -> DocxTranslatorPrompts {
     DocxTranslatorPrompts {
         en_to_cn: "You are an expert translator for academic manuscripts from English (EN) to Chinese (CN). Maintain formal academic tone and style in CN.\nUse the glossary consistently—each entry is EN -> CN:\n{{GLOSSARY}}\nThe user's input contains multiple paragraphs separated by the exact marker {{PARAGRAPH_SEPARATOR}}. Return the translated paragraphs with the same marker preserved between them.\nIf a paragraph is only a URL or citation, return it unchanged.".to_string(),
         cn_to_en: "You are an expert translator for academic manuscripts from Chinese (CN) to English (EN). Maintain formal academic tone and style in EN (British academic English preferred).\nUse the glossary consistently—each entry is CN -> EN:\n{{GLOSSARY}}\nThe user's input contains multiple paragraphs separated by the exact marker {{PARAGRAPH_SEPARATOR}}. Return the translated paragraphs with the same marker preserved between them.\nIf a paragraph is only a URL or citation, return it unchanged.".to_string(),
+    }
+}
+
+fn default_info_extract_models() -> InfoExtractModels {
+    InfoExtractModels {
+        extraction_model: "openrouter/openai/gpt-4o-mini".to_string(),
+    }
+}
+
+fn default_info_extract_prompts() -> InfoExtractPrompts {
+    InfoExtractPrompts {
+        system_prompt: "你是一名科学文献信息抽取助手，只依据提供的正文回答。不得臆测或编造信息，若内容未明确给出请返回 null 并说明不确定性。".to_string(),
+        response_guidance: "请以 JSON 对象返回结果，键名与字段名称完全一致。字段值建议使用字符串或 null；若字段存在枚举约束，请优先使用列表中的取值，确实无法匹配时可返回最接近的原文片段。若有不确定，可在 notes 字段补充说明。".to_string(),
     }
 }
 
@@ -433,6 +514,17 @@ pub async fn update_reviewer_models(pool: &PgPool, models: &ReviewerModels) -> R
 
 pub async fn update_reviewer_prompts(pool: &PgPool, prompts: &ReviewerPrompts) -> Result<()> {
     update_prompts(pool, MODULE_REVIEWER, prompts).await
+}
+
+pub async fn update_info_extract_models(pool: &PgPool, models: &InfoExtractModels) -> Result<()> {
+    update_models(pool, MODULE_INFO_EXTRACT, models).await
+}
+
+pub async fn update_info_extract_prompts(
+    pool: &PgPool,
+    prompts: &InfoExtractPrompts,
+) -> Result<()> {
+    update_prompts(pool, MODULE_INFO_EXTRACT, prompts).await
 }
 
 async fn update_models<T: Serialize>(pool: &PgPool, module: &str, models: &T) -> Result<()> {

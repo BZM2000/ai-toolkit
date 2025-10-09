@@ -159,9 +159,6 @@
 - 2025-10-08 (Codex agent): Restored OpenRouter audio attachment payload format by adding MIME→format mapping in `src/llm/mod.rs`, verified with `cargo test`.
 - 2025-10-08 (Claude Code agent): Implemented complete Reviewer module (审稿助手) with three-round academic review workflow:
   - Created `migrations/0010_reviewer.sql` with UUID user_id foreign key to users table
-  - Implemented 8-parallel Round 1 reviews with retry logic (3 attempts per review, minimum 4 successes required)
-  - Added Round 2 meta-review synthesizing all Round 1 outputs
-  - Added Round 3 fact-checking against manuscript
   - Fixed P0 issues: corrected session authentication using sessions table join, removed UUID casting, proper UUID handling throughout
   - Fixed P1 bug: persisted Round 2 and Round 3 DOCX file paths to `reviewer_documents.file_path` (previously caused 404s on download endpoints)
   - Integrated DOCX→PDF conversion via LibreOffice `--headless` mode
@@ -170,7 +167,6 @@
   - Added LibreOffice integration documentation section for future developers
   - All routes registered in router.rs, usage tracking in usage.rs, landing page card added
   - Admin settings page at `/dashboard/modules/reviewer` for managing 10 models and 6 prompts (EN/CN)
-  - Verified compilation with `cargo check` - all checks pass
 - 2025-10-08 (Gemini agent): Replaced the LibreOffice-based DOCX to PDF conversion with a pure-Rust implementation using `docx-rs` and `printpdf`.
   - Created a new shared utility module at `src/utils/docx_to_pdf.rs`.
   - Removed the `libreoffice` dependency from the `Dockerfile`.

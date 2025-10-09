@@ -57,6 +57,11 @@ fn render_main_page(user: &AuthUser, params: &LandingQuery) -> String {
             "/tools/summarizer",
         ),
         (
+            "系统综述信息提取",
+            "批量上传论文与提取模板，自动抽取研究地点、样本量等自定义字段。",
+            "/tools/infoextract",
+        ),
+        (
             "DOCX 文档翻译",
             "上传 Word 文档，利用术语表逐段翻译。",
             "/tools/translatedocx",

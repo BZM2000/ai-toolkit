@@ -54,6 +54,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(modules::summarizer::router())
         .merge(modules::translatedocx::router())
         .merge(modules::grader::router())
+        .merge(modules::info_extract::router())
         .merge(modules::reviewer::router())
         .with_state(state)
 }

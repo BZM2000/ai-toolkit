@@ -13,6 +13,7 @@ pub const MODULE_SUMMARIZER: &str = "summarizer";
 pub const MODULE_TRANSLATE_DOCX: &str = "translatedocx";
 pub const MODULE_GRADER: &str = "grader";
 pub const MODULE_REVIEWER: &str = "reviewer";
+pub const MODULE_INFO_EXTRACT: &str = "info_extract";
 
 /// Human readable labels for known modules to drive forms and display.
 pub struct ModuleDescriptor {
@@ -26,6 +27,11 @@ pub const REGISTERED_MODULES: &[ModuleDescriptor] = &[
         key: MODULE_SUMMARIZER,
         label: "摘要与翻译",
         unit_label: "文档数量",
+    },
+    ModuleDescriptor {
+        key: MODULE_INFO_EXTRACT,
+        label: "信息提取",
+        unit_label: "文献数量",
     },
     ModuleDescriptor {
         key: MODULE_TRANSLATE_DOCX,

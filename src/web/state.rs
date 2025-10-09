@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::{
     config::{
-        DocxTranslatorSettings, GraderSettings, ModuleSettings, ReviewerSettings,
-        SummarizerSettings,
+        DocxTranslatorSettings, GraderSettings, InfoExtractSettings, ModuleSettings,
+        ReviewerSettings, SummarizerSettings,
     },
     llm::LlmClient,
 };
@@ -119,6 +119,11 @@ impl AppState {
     pub async fn reviewer_settings(&self) -> Option<ReviewerSettings> {
         let guard = self.settings.read().await;
         guard.reviewer().cloned()
+    }
+
+    pub async fn info_extract_settings(&self) -> Option<InfoExtractSettings> {
+        let guard = self.settings.read().await;
+        guard.info_extract().cloned()
     }
 
     pub async fn reload_settings(&self) -> Result<()> {
