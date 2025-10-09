@@ -41,6 +41,7 @@ use crate::{
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_SUMMARIZER},
+    web::auth::{self, JsonAuthError},
 };
 
 const STORAGE_ROOT: &str = "storage/summarizer";
@@ -78,7 +79,7 @@ async fn summarizer_page(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Html<String>, Redirect> {
-    let user = require_user(&state, &jar).await?;
+    let user = auth::require_user_redirect(&state, &jar).await?;
 
     let username = escape_html(&user.username);
     let note_html = format!(
@@ -284,9 +285,9 @@ async fn create_job(
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar)
+    let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     let mut document_type = DocumentKind::ResearchArticle;
     let mut translate = true;
@@ -392,9 +393,9 @@ async fn job_status(
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
 ) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar)
+    let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     let pool = state.pool();
 
@@ -462,9 +463,9 @@ async fn download_combined_output(
     jar: CookieJar,
     AxumPath((job_id, variant)): AxumPath<(Uuid, String)>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar)
+    let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     let pool = state.pool();
 
@@ -1367,37 +1368,6 @@ struct ProcessingDocumentRecord {
     id: Uuid,
     original_filename: String,
     source_path: String,
-}
-
-#[derive(sqlx::FromRow)]
-struct SessionUser {
-    id: Uuid,
-    username: String,
-    is_admin: bool,
-}
-
-async fn require_user(state: &AppState, jar: &CookieJar) -> Result<SessionUser, Redirect> {
-    let token_cookie = jar
-        .get(crate::SESSION_COOKIE)
-        .ok_or_else(|| Redirect::to("/login"))?;
-
-    let token = Uuid::parse_str(token_cookie.value()).map_err(|_| Redirect::to("/login"))?;
-
-    let pool = state.pool();
-
-    let user = sqlx::query_as::<_, SessionUser>(
-        "SELECT users.id, users.username, users.is_admin FROM sessions INNER JOIN users ON users.id = sessions.user_id WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
-    )
-    .bind(token)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|err| {
-        error!(?err, "failed to load session for summarizer");
-        Redirect::to("/login")
-    })?
-    .ok_or_else(|| Redirect::to("/login"))?;
-
-    Ok(user)
 }
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {

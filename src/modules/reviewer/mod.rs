@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
     extract::{Multipart, Path as AxumPath, State},
     http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -30,11 +30,12 @@ use crate::web::{
     render_upload_widget,
 };
 use crate::{
-    AppState, SESSION_COOKIE, escape_html, history,
+    AppState, escape_html, history,
     llm::{AttachmentKind, ChatMessage, FileAttachment, LlmClient, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_REVIEWER},
     utils::docx_to_pdf::convert_docx_to_pdf,
+    web::auth::{self, JsonAuthError},
 };
 
 const STORAGE_ROOT: &str = "storage/reviewer";
@@ -64,13 +65,6 @@ pub fn router() -> Router<AppState> {
             "/dashboard/modules/reviewer/prompts",
             post(admin::save_prompts),
         )
-}
-
-#[derive(sqlx::FromRow, Clone)]
-struct SessionUser {
-    id: Uuid,
-    username: String,
-    is_admin: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -103,35 +97,11 @@ struct ReviewInfo {
     download_url: Option<String>,
 }
 
-async fn require_user(state: &AppState, jar: &CookieJar) -> Result<SessionUser, Response> {
-    let token_cookie = jar
-        .get(SESSION_COOKIE)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Not authenticated").into_response())?;
-
-    let token = Uuid::parse_str(token_cookie.value())
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid session").into_response())?;
-
-    sqlx::query_as::<_, SessionUser>(
-        "SELECT users.id, users.username, users.is_admin
-         FROM sessions
-         INNER JOIN users ON users.id = sessions.user_id
-         WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
-    )
-    .bind(token)
-    .fetch_optional(state.pool_ref())
-    .await
-    .map_err(|e| {
-        error!("Database error: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
-    })?
-    .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Session expired").into_response())
-}
-
 async fn reviewer_page(
     State(state): State<AppState>,
     jar: CookieJar,
-) -> Result<Html<String>, Response> {
-    let user = require_user(&state, &jar).await?;
+) -> Result<Html<String>, Redirect> {
+    let user = auth::require_user_redirect(&state, &jar).await?;
 
     let username = escape_html(&user.username);
     let note_html = format!(
@@ -346,7 +316,11 @@ async fn create_job(
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, Response> {
-    let user = require_user(&state, &jar).await?;
+    let user = auth::current_user_or_json_error(&state, &jar)
+        .await
+        .map_err(|JsonAuthError { status, message }| {
+            (status, Json(json!({ "message": message }))).into_response()
+        })?;
 
     if let Err(e) = usage::ensure_within_limits(state.pool_ref(), user.id, MODULE_REVIEWER, 1).await
     {
@@ -495,7 +469,11 @@ async fn job_status(
     jar: CookieJar,
     AxumPath(job_id): AxumPath<i32>,
 ) -> Result<Json<JobStatusResponse>, Response> {
-    let user = require_user(&state, &jar).await?;
+    let user = auth::current_user_or_json_error(&state, &jar)
+        .await
+        .map_err(|JsonAuthError { status, message }| {
+            (status, Json(json!({ "message": message }))).into_response()
+        })?;
 
     let job = sqlx::query_as::<_, JobRow>(
         "SELECT user_id, status, status_detail, files_purged_at
@@ -624,7 +602,11 @@ async fn download_review(
     jar: CookieJar,
     AxumPath((job_id, round, idx)): AxumPath<(i32, i32, i32)>,
 ) -> Result<Response, Response> {
-    let user = require_user(&state, &jar).await?;
+    let user = auth::current_user_or_json_error(&state, &jar)
+        .await
+        .map_err(|JsonAuthError { status, message }| {
+            (status, Json(json!({ "message": message }))).into_response()
+        })?;
 
     let job = sqlx::query_as::<_, JobRow>(
         "SELECT user_id, status, status_detail, files_purged_at

@@ -39,32 +39,29 @@
 - `robots.txt`: served for web crawlers via `web::router`.
 - `target/`: Cargo build artifacts (ignored in version control) useful for local compilation caching.
 - `storage/`: runtime directory (ignored by Git) where background jobs persist generated files, summaries, and translated documents.
+ 
+## Shared Services & Utilities
 
-### Current Web Application Layout (2025-xx)
+### Application Layout
 - `src/web/` owns all HTTP-facing logic: `state.rs` (shared `AppState`), `landing.rs`, `auth.rs`, and `admin.rs` (user & usage dashboards), plus `data.rs`, `models.rs`, and `templates.rs` for reusable queries and HTML.
 - Module-specific admin pages live alongside each tool (`src/modules/<tool>/admin.rs`) and register their settings routes from the module router; shared styling/widgets sit in `src/modules/admin_shared.rs` and helpers in `src/web/admin_utils.rs`.
 - `src/web/router.rs` builds the Axum `Router`, wiring auth, dashboard, and module routes (summarizer/infoextract/translatedocx/grader/reviewer) and serves `robots.txt`.
-- `src/main.rs` is now a thin bootstrap: initialize tracing, create `AppState`, call `web::router::build_router`, and start the server.
-- Downstream modules continue to consume shared helpers via re-exports in `src/web/mod.rs` (e.g., glossary/journal fetch helpers, `AppState`, HTML utilities).
+- `src/main.rs` is a thin bootstrap: initialize tracing, create `AppState`, call `web::router::build_router`, and start the server.
+- Shared helpers are re-exported via `src/web/mod.rs` so downstream modules can pull in `AppState`, HTML utilities, and data access helpers without deep paths.
 
-### Adding a New Tool Module (quick guide)
-1. **Module skeleton**: create `src/modules/<tool>/mod.rs` with a `Router<AppState>` builder (`pub fn router() -> Router<AppState>`) exposing `/tools/<tool>` and any `/api/<tool>` endpoints. Follow the structure used by existing tools (shared auth guards live in `web::auth`).
-2. **Shared page layout**: render the `/tools/<tool>` handler with `render_tool_page(ToolPageLayout { .. })` so the module inherits the standard header/back link/tab shell. Supply your new-task markup via `new_tab_html`, embed `history_ui::render_history_panel(MODULE_<TOOL>)` in `history_panel_html`, and append scripts/CSS through `body_scripts`/`extra_style_blocks` (wrap custom JS in `<script>...</script>` before pushing).
-3. **State/utilities**: use helpers from `AppState` (`state.pool()`/`state.llm_client()`) and shared usage accounting (`crate::usage`). Place module-specific SQL tables/migrations under `migrations/` with incremental numbering—include a `files_purged_at TIMESTAMPTZ` column on your job table for retention bookkeeping.
-4. **Configuration**: extend `ModuleSettings` in `src/config.rs` if the tool needs persisted model/prompt data. Seed defaults in `ensure_defaults`, update admin forms, and persist edits via new DB columns.
-5. **Admin UI wiring**: add a `modules::<tool>::admin` module to serve settings pages, wire its routes from the tool router, and reuse shared HTML helpers (`modules::admin_shared::MODULE_ADMIN_SHARED_STYLES`). POST handlers should call `state.reload_settings()` after writes.
-6. **Usage metering**: register the module in `src/usage.rs` (`REGISTERED_MODULES`) with proper unit/token labels and incorporate limit checks in the module’s request path.
-7. **History & retention hooks**: after inserting a new job, call `history::record_job_start(&pool, MODULE_<TOOL>, user_id, job_id)` so it appears in `/api/history` and the shared panels. Expose status/download endpoints that tolerate missing files and clear stored paths once `files_purged_at` is set.
-8. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool, consider adding a `/jobs` panel card if it requires special messaging, and add docs/tests as necessary.
+### Authentication & Sessions
+- `web::auth` centralises session handling. Use `current_user` to fetch an `AuthUser`, `require_user_redirect` inside HTML handlers to bounce unauthenticated users, and `current_user_or_json_error` for JSON endpoints that should emit consistent status/message pairs.
+- Sessions live in the `sessions` table, backed by the `auth_token` cookie with a 7-day TTL (`SESSION_TTL_DAYS`). `AuthUser::is_admin` flags privileged users for dashboard and download guards.
+- Login and logout continue to rely on `process_login`/`logout`, which issue and revoke session rows and cookies.
 
-## Shared LLM Utility
+### LLM Client
 - Module: `src/llm/mod.rs` exposes the reusable `LlmClient` plus request/response types.
 - Configure API keys via `OPENROUTER_API_KEY` and `POE_API_KEY`; optional `OPENROUTER_HTTP_REFERER` and `OPENROUTER_X_TITLE` headers can be set for OpenRouter analytics.
 - Instantiate a client with `let client = LlmClient::from_env()?;` and create a request using provider-prefixed models like `openrouter/openai/gpt-4o` or `poe/claude-3-haiku`.
 - Build chat turns with `ChatMessage::new(MessageRole::User, "prompt")`; attach files using `FileAttachment::new` (OpenRouter only supports `AttachmentKind::Image | Audio | Pdf`).
 - Call `client.execute(request).await?` to receive `LlmResponse` containing assistant text, provider info, raw JSON, and token counts (approximate when providers omit them).
 
-## Shared Upload Utilities (2025-10-09)
+### Upload Pipeline
 - **Backend** (`src/web/uploads.rs`): standardises multipart parsing and disk writes.
   - Describe expected file inputs with `FileFieldConfig::new(field, allowed_exts, max_files, FileNaming::Indexed { prefix: "source_", pad_width: 3 })`; chain `.with_min_files(n)` for required uploads.
   - Create the per-job directory with `ensure_upload_directory(&job_dir).await?`, then call `process_upload_form(multipart, &job_dir, &[config_docs, config_spec]).await?`.
@@ -101,24 +98,42 @@
   2. Swap the HTML drop-zone for `render_upload_widget`, keeping module-specific controls (checkboxes, selects) outside the widget.
   3. Remove bespoke CSS/JS once the shared widget is embedded; retain module-specific copy via `UploadWidgetConfig::with_note` or surrounding labels.
 
-## Shared Tool Page Layout (2025-10-11)
-- `src/web/templates.rs` now exposes `ToolPageLayout` and `ToolAdminLink`; call `render_tool_page` from `/tools/<module>` handlers to inherit the standard header, back link, tab chrome, and footer.
+### Tool Page Layout
+- `src/web/templates.rs` exposes `ToolPageLayout` and `ToolAdminLink`; call `render_tool_page` from `/tools/<module>` handlers to inherit the standard header, back link, tab chrome, and footer.
 - Populate the layout slots with module-specific markup: pass the new-task panel HTML (typically two `<section class="panel">` blocks) via `new_tab_html` and reuse `history_ui::render_history_panel(MODULE_<TOOL>)` for `history_panel_html`.
-- Add optional CSS/JS by pushing strings (wrapped in `.into()` / `Cow::Borrowed`) into `extra_style_blocks` and `body_scripts`. Embed `<script>…</script>` around custom scripts before pushing and reuse shared snippets like `UPLOAD_WIDGET_STYLES`/`UPLOAD_WIDGET_SCRIPT` as needed.
+- Add optional CSS/JS by pushing strings (wrapped in `.into()` / `Cow::Borrowed`) into `extra_style_blocks` and `body_scripts`. Embed `<script>…</script>` around custom scripts before pushing and reuse shared snippets like `UPLOAD_WIDGET_STYLES`/`UPLOAD_WIDGET_SCRIPT`.
 - Provide an `admin_link` when the module has a dashboard settings page so the badge renders automatically; omit it for user-only tools.
-- Summarizer, DOCX translator, info_extract, grader, and reviewer already demonstrate the pattern—mirror their usage when wiring future modules to avoid hand-rolled page scaffolding.
+- Summarizer, DOCX translator, info_extract, grader, and reviewer demonstrate the pattern—mirror their usage to avoid hand-rolled page scaffolding.
 
-## Model Configuration
+### Module Configuration
 - All module model selections are stored in the `module_configs` table under the `models` JSON column. Administrators manage these values from the dedicated module setting pages inside the dashboard.
 - The server seeds defaults on first boot (matching the old YAML values) via `ModuleSettings::ensure_defaults`. Subsequent edits happen through the web UI and persist in Postgres; YAML files now serve only as bootstrap defaults.
 - Updating models through the admin UI triggers an in-memory reload so changes take effect without restarting the service.
 
-## Prompt Configuration
-- Prompt text shares the same `module_configs` table using the `prompts` JSON column. Each module has a dedicated admin page for editing prompt bodies (e.g. summarizer, DOCX translator, grader). Changes are persisted in Postgres and reloaded without a restart.
+### Prompt Configuration
+- Prompt text shares the same `module_configs` table using the `prompts` JSON column. Each module has a dedicated admin page for editing prompt bodies (e.g. summarizer, DOCX translator, grader). Changes persist in Postgres and reload without a restart.
 - Validation guards remain: summarizer translation prompts must contain `{{GLOSSARY}}`; DOCX prompts must include both `{{GLOSSARY}}` and `{{PARAGRAPH_SEPARATOR}}`; grader keyword prompts must include `{{KEYWORDS}}`.
 - The server seeds initial defaults from the legacy YAML file on first run; afterwards only the admin UI controls these values.
 
-## Summarizer Module
+### History & Retention
+- Background jobs call `history::record_job_start` to populate `user_job_history` and power the `/api/history` endpoint plus the shared history panels.
+- `history_ui` supplies the frontend panels and polling script embedded on each tool page and the `/jobs` overview.
+- `maintenance::spawn` enforces the 24-hour retention policy by clearing generated files under `storage/*` and nulling persisted download paths; download handlers return HTTP `410 Gone` once resources expire.
+- The retention schema adds `files_purged_at` to module job tables so history surfaces can distinguish expired outputs.
+
+## Building a New Tool Module
+1. **Module skeleton**: create `src/modules/<tool>/mod.rs` with a `Router<AppState>` exposing `/tools/<tool>` and `/api/<tool>` endpoints. Use `auth::require_user_redirect` for HTML handlers and `auth::current_user_or_json_error` (or `current_user`) inside API routes to enforce sessions consistently.
+2. **Shared page layout**: render the `/tools/<tool>` handler with `render_tool_page(ToolPageLayout { .. })` so the module inherits the standard header/back link/tab shell. Supply your new-task markup via `new_tab_html`, embed `history_ui::render_history_panel(MODULE_<TOOL>)` in `history_panel_html`, and append scripts/CSS through `body_scripts`/`extra_style_blocks` (wrap custom JS in `<script>...</script>`).
+3. **State/utilities**: use helpers from `AppState` (`state.pool()`/`state.llm_client()`) and shared usage accounting (`crate::usage`). Place module-specific SQL tables/migrations under `migrations/` with incremental numbering—include a `files_purged_at TIMESTAMPTZ` column on your job table for retention bookkeeping.
+4. **Configuration**: extend `ModuleSettings` in `src/config.rs` if the tool needs persisted model/prompt data. Seed defaults in `ensure_defaults`, update admin forms, and persist edits via new DB columns.
+5. **Admin UI wiring**: add a `modules::<tool>::admin` module to serve settings pages, wire its routes from the tool router, and reuse shared HTML helpers (`modules::admin_shared::MODULE_ADMIN_SHARED_STYLES`). POST handlers should call `state.reload_settings()` after writes.
+6. **Usage metering**: register the module in `src/usage.rs` (`REGISTERED_MODULES`) with proper unit/token labels and incorporate limit checks in the module’s request path.
+7. **History & retention hooks**: after inserting a new job, call `history::record_job_start(&pool, MODULE_<TOOL>, user_id, job_id)` so it appears in `/api/history` and the shared panels. Expose status/download endpoints that tolerate missing files and clear stored paths once `files_purged_at` is set.
+8. **Surface links**: update the landing page cards (`web::landing::render_main_page`) to advertise the new tool, consider adding a `/jobs` panel card if it requires special messaging, and add docs/tests as necessary.
+
+## Tool Modules
+
+### Summarizer Module
 - Routes mounted under `/tools/summarizer` (HTML form) and `/api/summarizer` (JSON/download endpoints).
 - Authenticated users can upload up to 10 `.pdf`, `.docx`, or `.txt` files per job, select document type, and toggle translation; background worker writes outputs to `storage/summarizer/<job_id>/`.
 - Progress and downloads:
@@ -128,7 +143,7 @@
 - Glossary terms are now persisted in `glossary_terms` as EN -> CN pairs; admins manage them from the dashboard, and translation prompts incorporate the local glossary (no external fetch).
 - Usage accounting: `users.usage_count` increments by successfully processed documents; request is rejected if projected usage would exceed `usage_limit`.
 
-## Info Extract Module
+### Info Extract Module
 - Routes mounted under `/tools/infoextract` (HTML form), `/tools/infoextract/jobs` (job creation), `/api/infoextract/jobs/{job_id}` (status polling), and `/api/infoextract/jobs/{job_id}/download/result` (XLSX download).
 - Users upload 1-100 PDF manuscripts plus a required XLSX field-definition template; row 1 supplies field names, row 2 optional descriptions, row 3 optional examples (semicolon separated), and row 4 optional allowed values (mutually exclusive with examples). The template is validated before the job is queued.
 - Backend persists metadata in `info_extract_jobs`/`info_extract_documents`, stores uploads under `storage/infoextract/<job_id>/`, and spawns a worker that processes up to five papers concurrently.
@@ -137,7 +152,7 @@
 - Usage tracking logs per-document units and total tokens via `usage::record_usage`; submission is rejected if the projected document count exceeds the user's limits.
 - Admin settings live at `/dashboard/modules/infoextract`, letting administrators update the extraction model and prompts stored in `ModuleSettings` without restarting the service.
 
-## DOCX Translator Module
+### DOCX Translator Module
 - Routes mounted under `/tools/translatedocx` (HTML form) and `/api/translatedocx` (status/download endpoints).
 - Accepts a single `.docx` file per job, with a user-facing toggle for EN → CN or CN → EN translation; glossary substitutions and the paragraph separator marker are honored in both directions.
 - Background worker rewrites the uploaded file into a fresh DOCX stored at `storage/translatedocx/<job_id>/translated_1.docx` and exposes a direct download once complete.
@@ -145,7 +160,7 @@
 - Translated downloads live at `/api/translatedocx/jobs/{job}/{doc}/download/translated`.
 - Usage counting mirrors the summarizer: each successful document increments `users.usage_count`, and the job aborts if account limits would be exceeded.
 
-## Grader Module
+### Grader Module
 - Routes mounted under `/tools/grader` (HTML interface) and `/api/grader` (JSON status endpoint).
 - Users upload a single `.pdf`, `.docx`, or `.txt` manuscript; the background worker extracts text, performs up to 30 LLM grading attempts (stopping early once 12 valid runs are collected), and computes an interquartile-mean score with docx-specific penalty.
 - Keyword extraction runs on the same LLM (configured in `modules.grader.keyword_model`) and maps results against admin-managed topics to weight journal matches.
@@ -153,7 +168,7 @@
 - Usage counting increments by one per successful job; jobs abort early if the projected usage would exceed a user's limit.
 - Admin dashboard提供专题与期刊参考管理表单：提交同名主题或期刊会覆盖原值，期刊分值会自动更新至推荐逻辑。
 
-## Reviewer Module
+### Reviewer Module
 - Routes mounted under `/tools/reviewer` (HTML interface), `/api/reviewer/jobs/{id}` (status endpoint), and `/api/reviewer/jobs/{job_id}/round/{round}/review/{idx}/download` (DOCX download).
 - Users upload a single `.pdf` or `.docx` manuscript and select review language (English or Chinese); the background worker orchestrates a three-round review process.
 - Workflow:
@@ -192,6 +207,30 @@
 - Unit tests (`cargo test`) cover translation prompt assembly and DOCX text extraction helpers.
 - For manual end-to-end checks: run `cargo run`, log in as an admin, add glossary entries, submit a summarizer job, watch `/api/summarizer/jobs/{id}` poll results, and verify downloads.
 - Build verification: `cargo build --release` to compile all modules.
+
+## Centralisation Masterplan
+- **Unified auth/session helpers**: expose shared `require_user` variants from `web::auth` so modules depend on a single guard implementation (HTML redirect + JSON error adapters) instead of duplicating SQL session checks and `SessionUser` structs.
+- **Shared API response scaffolding**: create `web::responses` with reusable `ApiError`, `JobSubmissionResponse`, and `internal_error` helpers to eliminate per-module clones and align error copy.
+- **Consistent job status modeling**: define a core `JobStatus` enum + serde helpers and bundle a shared front-end label map, keeping Axum responses and UI tags in sync across modules and the history panel.
+- **Storage & download utilities**: extract `storage::ensure_root` and `download_guard` helpers that encapsulate directory creation, ownership checks, and `files_purged_at` handling before streaming outputs.
+- **Job poller client kit**: publish a shared JS initializer (e.g., `window.initJobForm`) that wraps FormData submission, status messaging, and polling intervals so each tool only supplies render callbacks.
+
+### Detailed Plan: Unified auth/session helpers
+1. **Inventory current guards**
+   - Catalogue `require_user` implementations and `SessionUser` structs in all modules (`summarizer`, `translatedocx`, `info_extract`, `grader`, `reviewer`) plus `web::history` to confirm required fields and error handling variants (redirect vs. JSON response).
+2. **Design shared interface**
+   - Extend `web::auth` with a reusable `SessionUser` (aliasing existing `AuthUser`) and provide helper functions: `require_user_redirect(jar, state)` returning `Result<AuthUser, Redirect>` and `require_user_json(jar, state)` returning `Result<AuthUser, (StatusCode, Json<ApiError>)>`.
+   - Allow optional admin enforcement and custom unauthorized messages via parameters so modules avoid bespoke checks.
+3. **Implement backend helpers**
+   - Refactor `web::auth` to expose the helpers, ensuring they reuse existing `fetch_user_by_session` logic and centralize tracing/error logs.
+   - Add targeted unit or integration tests (if feasible) covering valid session, expired session, and admin-only scenarios.
+4. **Migrate modules incrementally**
+   - Update each module to drop local `SessionUser`/`require_user`, import the shared helper, and adjust call sites (HTML handlers use redirect variant; JSON endpoints map errors into their existing `ApiError`).
+   - Remove redundant SQL queries, making sure admin gates still behave correctly.
+5. **Cleanup & verification**
+   - Run `cargo fmt` + `cargo check` to confirm compilation.
+   - Smoke-test at least one HTML and one JSON endpoint per module in dev to ensure redirects and error bodies match expectations.
+   - Document the helper usage pattern in `AGENTS.md` or module quick-start notes for future contributors.
 
 ## Agent Log
 - 2025-10-08 (Codex agent): Ran `cargo test` after recent usage aggregation fixes, resolved new `GlossaryTermRow` field requirements in summarizer and DOCX translator tests, and confirmed test suite now passes.
@@ -241,3 +280,4 @@
   - 前端历史面板支持轮询、状态详情与下载链接，过期任务显示“结果已清除”并禁用下载按钮。
   - 各模块作业创建后统一记录历史，成功/失败队列与下载端点均反映清理状态，确保 24 小时后自动失效。
 - 2025-10-11 (Codex agent): 统一工具页布局，新增 `ToolPageLayout`/`render_tool_page` 并迁移五个模块以复用共享 header/标签页壳，更新新模块指南与文档说明，`cargo check` 通过。
+- 2025-10-11 (Codex agent): Centralised session guards via `web::auth::{current_user, require_user_redirect, current_user_or_json_error}`; removed per-module `SessionUser` structs and aligned history/api handlers to the shared helpers, `cargo fmt` + `cargo check` clean.

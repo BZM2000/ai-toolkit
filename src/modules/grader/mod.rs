@@ -40,6 +40,7 @@ use crate::{
     llm::{ChatMessage, LlmClient, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_GRADER},
+    web::auth::{self, JsonAuthError},
 };
 
 const STORAGE_ROOT: &str = "storage/grader";
@@ -77,13 +78,6 @@ pub fn router() -> Router<AppState> {
             "/dashboard/modules/grader/prompts",
             post(admin::save_prompts),
         )
-}
-
-#[derive(sqlx::FromRow, Clone)]
-struct SessionUser {
-    id: Uuid,
-    username: String,
-    is_admin: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -227,7 +221,7 @@ pub async fn grader_page(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Html<String>, Redirect> {
-    let user = require_user(&state, &jar).await?;
+    let user = auth::require_user_redirect(&state, &jar).await?;
     let username = escape_html(&user.username);
     let note_html = format!(
         "当前登录：<strong>{username}</strong>。上传 PDF、DOCX 或 TXT 稿件，系统会估计投稿水平并推荐期刊。",
@@ -468,9 +462,9 @@ async fn create_job(
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar)
+    let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     let pool = state.pool();
 
@@ -567,9 +561,9 @@ async fn job_status(
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
 ) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar)
+    let user = auth::current_user_or_json_error(&state, &jar)
         .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     let pool = state.pool();
 
@@ -1363,30 +1357,6 @@ fn extract_docx_text(path: &Path) -> Result<String> {
     }
 
     Ok(output.trim().to_string())
-}
-
-async fn require_user(state: &AppState, jar: &CookieJar) -> Result<SessionUser, Redirect> {
-    let token_cookie = jar
-        .get(crate::SESSION_COOKIE)
-        .ok_or_else(|| Redirect::to("/login"))?;
-
-    let token = Uuid::parse_str(token_cookie.value()).map_err(|_| Redirect::to("/login"))?;
-
-    let pool = state.pool();
-
-    let user = sqlx::query_as::<_, SessionUser>(
-        "SELECT users.id, users.username, users.is_admin FROM sessions INNER JOIN users ON users.id = sessions.user_id WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
-    )
-    .bind(token)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|err| {
-        error!(?err, "failed to load session for grader module");
-        Redirect::to("/login")
-    })?
-    .ok_or_else(|| Redirect::to("/login"))?;
-
-    Ok(user)
 }
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, Json<ApiError>) {

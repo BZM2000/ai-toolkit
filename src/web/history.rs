@@ -8,12 +8,12 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::Utc;
 use serde::Deserialize;
 use tracing::error;
-use uuid::Uuid;
 
-use crate::web::history_ui;
-use crate::{
-    SESSION_COOKIE, history,
-    web::{AppState, AuthUser, auth},
+use crate::history;
+use crate::web::{
+    AppState,
+    auth::{self, JsonAuthError},
+    history_ui,
 };
 use crate::{escape_html, render_footer};
 
@@ -66,7 +66,9 @@ pub async fn recent_history(
     jar: CookieJar,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, (StatusCode, Json<ApiError>)> {
-    let user = require_user(&state, &jar).await?;
+    let user = auth::current_user_or_json_error(&state, &jar)
+        .await
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     if let Some(ref module) = query.module {
         if history::module_metadata(module).is_none() {
@@ -129,7 +131,7 @@ pub async fn jobs_page(
     State(state): State<AppState>,
     jar: CookieJar,
 ) -> Result<Html<String>, Redirect> {
-    let user = ensure_user(&state, &jar).await?;
+    let user = auth::require_user_redirect(&state, &jar).await?;
     let username = escape_html(&user.username);
     let footer = render_footer();
 
@@ -190,52 +192,4 @@ pub async fn jobs_page(
     );
 
     Ok(Html(html))
-}
-
-async fn require_user(
-    state: &AppState,
-    jar: &CookieJar,
-) -> Result<AuthUser, (StatusCode, Json<ApiError>)> {
-    let cookie = jar
-        .get(SESSION_COOKIE)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(ApiError::new("请先登录。"))))?;
-
-    let token = Uuid::parse_str(cookie.value()).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("会话无效，请重新登录。")),
-        )
-    })?;
-
-    let pool = state.pool();
-    match auth::fetch_user_by_session(&pool, token).await {
-        Ok(Some(user)) => Ok(user),
-        Ok(None) => Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("会话已过期，请重新登录。")),
-        )),
-        Err(err) => {
-            error!(?err, "failed to validate session for history endpoint");
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError::new("无法验证会话，请稍后再试。")),
-            ))
-        }
-    }
-}
-
-async fn ensure_user(state: &AppState, jar: &CookieJar) -> Result<AuthUser, Redirect> {
-    let cookie = jar
-        .get(SESSION_COOKIE)
-        .ok_or_else(|| Redirect::to("/login"))?;
-    let token = Uuid::parse_str(cookie.value()).map_err(|_| Redirect::to("/login"))?;
-    let pool = state.pool();
-    match auth::fetch_user_by_session(&pool, token).await {
-        Ok(Some(user)) => Ok(user),
-        Ok(None) => Err(Redirect::to("/login")),
-        Err(err) => {
-            error!(?err, "failed to validate session for history page");
-            Err(Redirect::to("/login"))
-        }
-    }
 }

@@ -11,7 +11,7 @@ use axum::{
     Json, Router,
     extract::{Multipart, Path as AxumPath, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect},
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -35,12 +35,13 @@ use crate::web::{
     render_upload_widget,
 };
 use crate::{
-    AppState, SESSION_COOKIE,
+    AppState,
     config::{InfoExtractModels, InfoExtractPrompts},
     escape_html, history,
     llm::{ChatMessage, LlmRequest, MessageRole},
     render_footer,
     usage::{self, MODULE_INFO_EXTRACT},
+    web::auth::{self, JsonAuthError},
 };
 
 const STORAGE_ROOT: &str = "storage/infoextract";
@@ -72,13 +73,6 @@ pub fn router() -> Router<AppState> {
             "/dashboard/modules/infoextract/prompts",
             post(admin::save_prompts),
         )
-}
-
-#[derive(sqlx::FromRow)]
-struct SessionUser {
-    id: Uuid,
-    username: String,
-    is_admin: bool,
 }
 
 #[derive(Serialize)]
@@ -172,33 +166,11 @@ struct DocumentExtractionResult {
     success: bool,
 }
 
-async fn fetch_session_user(state: &AppState, jar: &CookieJar) -> Result<SessionUser> {
-    let token_cookie = jar.get(SESSION_COOKIE).context("missing auth cookie")?;
-
-    let token = Uuid::parse_str(token_cookie.value()).context("invalid session token")?;
-
-    let user = sqlx::query_as::<_, SessionUser>(
-        "SELECT users.id, users.username, users.is_admin
-         FROM sessions
-         INNER JOIN users ON users.id = sessions.user_id
-         WHERE sessions.id = $1 AND sessions.expires_at > NOW()",
-    )
-    .bind(token)
-    .fetch_optional(state.pool_ref())
-    .await
-    .context("failed to load session user")?
-    .context("session expired")?;
-
-    Ok(user)
-}
-
 async fn info_extract_page(
     State(state): State<AppState>,
     jar: CookieJar,
-) -> Result<Html<String>, Response> {
-    let user = fetch_session_user(&state, &jar)
-        .await
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "未登录或会话失效").into_response())?;
+) -> Result<Html<String>, Redirect> {
+    let user = auth::require_user_redirect(&state, &jar).await?;
 
     let username = escape_html(&user.username);
     let note_html = format!(
@@ -438,12 +410,9 @@ async fn create_job(
     jar: CookieJar,
     multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
-    let user = fetch_session_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("请先登录后再提交任务。")),
-        )
-    })?;
+    let user = auth::current_user_or_json_error(&state, &jar)
+        .await
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     ensure_storage_root()
         .await
@@ -591,12 +560,9 @@ async fn job_status(
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
 ) -> Result<Json<JobStatusResponse>, (StatusCode, Json<ApiError>)> {
-    let user = fetch_session_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("请先登录后查看任务状态。")),
-        )
-    })?;
+    let user = auth::current_user_or_json_error(&state, &jar)
+        .await
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     let pool = state.pool();
 
@@ -663,12 +629,9 @@ async fn download_result(
     jar: CookieJar,
     AxumPath(job_id): AxumPath<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let user = fetch_session_user(&state, &jar).await.map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("请先登录后下载结果。")),
-        )
-    })?;
+    let user = auth::current_user_or_json_error(&state, &jar)
+        .await
+        .map_err(|JsonAuthError { status, message }| (status, Json(ApiError::new(message))))?;
 
     let pool = state.pool();
     let record = sqlx::query_as::<_, DownloadRecord>(

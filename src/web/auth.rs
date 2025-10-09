@@ -11,10 +11,98 @@ use cookie::time::Duration as CookieDuration;
 use rand_core::OsRng;
 use serde::Deserialize;
 use sqlx::PgPool;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::web::{AppState, render_login_page};
+
+#[derive(Debug)]
+pub enum AuthError {
+    MissingCookie,
+    InvalidToken,
+    SessionExpired,
+    Database(sqlx::Error),
+}
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthError::MissingCookie => write!(f, "missing auth cookie"),
+            AuthError::InvalidToken => write!(f, "invalid session token"),
+            AuthError::SessionExpired => write!(f, "session expired"),
+            AuthError::Database(_) => write!(f, "failed to validate session"),
+        }
+    }
+}
+
+impl std::error::Error for AuthError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AuthError::Database(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<sqlx::Error> for AuthError {
+    fn from(err: sqlx::Error) -> Self {
+        AuthError::Database(err)
+    }
+}
+
+pub async fn current_user(state: &AppState, jar: &CookieJar) -> Result<AuthUser, AuthError> {
+    let token_cookie = jar.get(SESSION_COOKIE).ok_or(AuthError::MissingCookie)?;
+    let token = Uuid::parse_str(token_cookie.value()).map_err(|_| AuthError::InvalidToken)?;
+    let pool = state.pool();
+
+    let user = fetch_user_by_session(&pool, token).await?;
+    user.ok_or(AuthError::SessionExpired)
+}
+
+pub async fn require_user_redirect(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<AuthUser, Redirect> {
+    match current_user(state, jar).await {
+        Ok(user) => Ok(user),
+        Err(err) => {
+            warn!(?err, "redirecting unauthenticated user");
+            Err(Redirect::to("/login"))
+        }
+    }
+}
+
+pub struct JsonAuthError {
+    pub status: StatusCode,
+    pub message: &'static str,
+}
+
+pub async fn current_user_or_json_error(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<AuthUser, JsonAuthError> {
+    match current_user(state, jar).await {
+        Ok(user) => Ok(user),
+        Err(err) => {
+            warn!(?err, "blocking unauthenticated JSON request");
+            let message = match err {
+                AuthError::MissingCookie | AuthError::InvalidToken | AuthError::SessionExpired => {
+                    "请先登录。"
+                }
+                AuthError::Database(_) => "无法验证会话，请稍后再试。",
+            };
+
+            let status = match err {
+                AuthError::MissingCookie | AuthError::InvalidToken | AuthError::SessionExpired => {
+                    StatusCode::UNAUTHORIZED
+                }
+                AuthError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+
+            Err(JsonAuthError { status, message })
+        }
+    }
+}
 
 #[derive(Clone, sqlx::FromRow)]
 pub struct DbUserAuth {
