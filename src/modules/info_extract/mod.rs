@@ -18,15 +18,18 @@ use calamine::{DataType, Reader, Xlsx};
 use futures::future::join_all;
 use pdf_extract::extract_text as extract_pdf_text;
 use rust_xlsxwriter::Workbook;
-use sanitize_filename::sanitize;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use tokio::{fs as tokio_fs, io::AsyncWriteExt, sync::Semaphore, task, time::sleep};
+use tokio::{fs as tokio_fs, sync::Semaphore, task, time::sleep};
 use tracing::{error, warn};
 use uuid::Uuid;
 
 mod admin;
 
+use crate::web::{
+    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
+    process_upload_form, render_upload_widget,
+};
 use crate::{
     AppState, SESSION_COOKIE,
     config::{InfoExtractModels, InfoExtractPrompts},
@@ -164,12 +167,6 @@ struct DocumentExtractionResult {
     success: bool,
 }
 
-#[derive(Debug)]
-struct UploadedDocument {
-    stored_path: PathBuf,
-    original_name: String,
-}
-
 async fn fetch_session_user(state: &AppState, jar: &CookieJar) -> Result<SessionUser> {
     let token_cookie = jar.get(SESSION_COOKIE).context("missing auth cookie")?;
 
@@ -201,11 +198,28 @@ async fn info_extract_page(
     let footer = render_footer();
     let username = escape_html(&user.username);
     let admin_link = if user.is_admin {
-        r#"<a class=\"admin-link\" href=\"/dashboard/modules/infoextract\">模块管理</a>"#
-            .to_string()
+        r#"<a class="admin-link" href="/dashboard/modules/infoextract">模块管理</a>"#.to_string()
     } else {
         String::new()
     };
+    let upload_styles = UPLOAD_WIDGET_STYLES;
+    let docs_widget = render_upload_widget(
+        &UploadWidgetConfig::new(
+            "infoextract-docs",
+            "documents",
+            "documents",
+            "上传论文（PDF，最多 100 篇）",
+        )
+        .with_description("支持批量上传 PDF，单次任务最多 100 篇。")
+        .with_multiple(Some(MAX_DOCUMENTS))
+        .with_accept(".pdf"),
+    );
+    let spec_widget = render_upload_widget(
+        &UploadWidgetConfig::new("infoextract-spec", "spec", "spec", "上传字段定义表（XLSX）")
+            .with_description("第 1 行名称，第 2 行说明，第 3 行示例（分号分隔），第 4 行枚举（分号分隔）。示例与枚举不可同时填写。")
+            .with_accept(".xlsx"),
+    );
+    let upload_script = UPLOAD_WIDGET_SCRIPT;
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -232,16 +246,6 @@ async fn info_extract_page(
         button:hover {{ background: #1d4ed8; }}
         button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
         .note {{ color: #475569; font-size: 0.95rem; line-height: 1.6; }}
-        .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
-        .drop-zone strong {{ color: #1d4ed8; }}
-        .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
-        .drop-zone input[type="file"] {{ display: none; }}
-        .browse-link {{ color: #2563eb; text-decoration: underline; cursor: pointer; font-weight: 600; }}
-        .file-list {{ margin: 1rem 0; padding: 0; list-style: none; display: grid; gap: 0.6rem; }}
-        .file-item {{ display: flex; justify-content: space-between; align-items: center; padding: 0.6rem 0.8rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #ffffff; box-shadow: 0 6px 16px rgba(15,23,42,0.05); font-size: 0.92rem; }}
-        .file-item span {{ flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 0.75rem; }}
-        .remove-file {{ background: transparent; color: #dc2626; border: none; font-weight: 600; cursor: pointer; }}
-        .remove-file:hover {{ text-decoration: underline; }}
         .status {{ margin-top: 1.5rem; font-size: 0.95rem; }}
         .status .error {{ color: #b91c1c; }}
         .status .success {{ color: #166534; }}
@@ -260,9 +264,8 @@ async fn info_extract_page(
             header {{ padding: 1.5rem 1rem; }}
             main {{ padding: 1.5rem 1rem; }}
             .header-bar {{ flex-direction: column; align-items: flex-start; }}
-            .drop-zone {{ padding: 1.5rem 1rem; }}
-            .job-table {{ font-size: 0.85rem; }}
         }}
+        {upload_styles}
     </style>
 </head>
 <body>
@@ -280,26 +283,12 @@ async fn info_extract_page(
         <section class="panel">
             <h2>发起新任务</h2>
             <form id="infoextract-form">
-                <label>上传论文（PDF，最多 100 篇）</label>
-                <div id="doc-drop-area" class="drop-zone">
-                    <p><strong>拖拽 PDF 文件</strong>到此处，或<span class="browse-link" data-target="documents">点击选择</span>文件。</p>
-                    <p class="note" style="margin:0">支持批量上传，单次任务上限 100 篇。</p>
-                    <input id="documents" name="documents" type="file" multiple accept=".pdf" required>
-                </div>
-                <ul id="documents-list" class="file-list"></ul>
-
-                <label>上传字段定义表（XLSX）</label>
-                <div id="spec-drop-area" class="drop-zone">
-                    <p><strong>拖拽或选择 XLSX 文件</strong>，描述要提取的字段。</p>
-                    <p class="note" style="margin:0">第 1 行名称，第 2 行说明，第 3 行示例（分号分隔），第 4 行枚举（分号分隔）。至少填写一行说明/示例/枚举，且示例与枚举不可同时填写。</p>
-                    <span class="browse-link" data-target="spec">点击选择</span>
-                    <input id="spec" name="spec" type="file" accept=".xlsx" required>
-                </div>
-                <ul id="spec-list" class="file-list"></ul>
-
+                {docs_widget}
+                {spec_widget}
                 <button type="submit">开始处理</button>
             </form>
             <div id="form-status" class="status"></div>
+            <p class="note" style="margin-top:0.75rem;">字段定义表说明：第 1 行名称，第 2 行说明，第 3 行示例（分号分隔），第 4 行枚举（分号分隔）。示例与枚举不可同时填写。</p>
         </section>
         <section class="panel">
             <h2>任务进度</h2>
@@ -307,150 +296,115 @@ async fn info_extract_page(
         </section>
         {footer}
     </main>
+    {upload_script}
     <script>
         const form = document.getElementById('infoextract-form');
         const statusBox = document.getElementById('form-status');
         const jobStatus = document.getElementById('job-status');
         const documentsInput = document.getElementById('documents');
         const specInput = document.getElementById('spec');
-        const documentsList = document.getElementById('documents-list');
-        const specList = document.getElementById('spec-list');
-        const docDropArea = document.getElementById('doc-drop-area');
-        const specDropArea = document.getElementById('spec-drop-area');
         let pollTimer = null;
 
-        function renderDocuments() {{
-            documentsList.innerHTML = '';
-            const files = Array.from(documentsInput.files);
-            files.forEach((file, idx) => {{
-                const li = document.createElement('li');
-                li.className = 'file-item';
-                li.innerHTML = `<span>${{file.name}}</span>`;
-                const remove = document.createElement('button');
-                remove.type = 'button';
-                remove.className = 'remove-file';
-                remove.textContent = '移除';
-                remove.addEventListener('click', () => removeDocument(idx));
-                li.appendChild(remove);
-                documentsList.appendChild(li);
-            }});
-        }}
+        const resetStatus = () => {{
+            statusBox.textContent = '';
+            statusBox.classList.remove('error', 'success');
+        }};
 
-        function removeDocument(index) {{
-            const files = Array.from(documentsInput.files);
-            files.splice(index, 1);
-            const dataTransfer = new DataTransfer();
-            files.forEach(file => dataTransfer.items.add(file));
-            documentsInput.files = dataTransfer.files;
-            renderDocuments();
-        }}
-
-        function setSpecFile(file) {{
-            const dataTransfer = new DataTransfer();
-            dataTransfer.items.add(file);
-            specInput.files = dataTransfer.files;
-            renderSpec();
-        }}
-
-        function renderSpec() {{
-            specList.innerHTML = '';
-            const file = specInput.files[0];
-            if (!file) return;
-            const li = document.createElement('li');
-            li.className = 'file-item';
-            li.innerHTML = `<span>${{file.name}}</span>`;
-            const remove = document.createElement('button');
-            remove.type = 'button';
-            remove.className = 'remove-file';
-            remove.textContent = '移除';
-            remove.addEventListener('click', () => {{ specInput.value = ''; specList.innerHTML = ''; }});
-            li.appendChild(remove);
-            specList.appendChild(li);
-        }}
-
-        function preventDefaults(e) {{
-            e.preventDefault();
-            e.stopPropagation();
-        }}
-
-        function handleDrop(zone, handler) {{
-            zone.addEventListener('dragenter', preventDefaults);
-            zone.addEventListener('dragover', e => {{
-                preventDefaults(e);
-                zone.classList.add('dragover');
-            }});
-            zone.addEventListener('dragleave', e => {{
-                preventDefaults(e);
-                zone.classList.remove('dragover');
-            }});
-            zone.addEventListener('drop', e => {{
-                preventDefaults(e);
-                zone.classList.remove('dragover');
-                handler(e.dataTransfer.files);
-            }});
-        }}
-
-        handleDrop(docDropArea, files => {{
-            const current = Array.from(documentsInput.files);
-            for (const file of files) {{
-                if (!file.name.toLowerCase().endsWith('.pdf')) continue;
-                current.push(file);
+        const setStatus = (message, type = null) => {{
+            statusBox.textContent = message;
+            statusBox.classList.remove('error', 'success');
+            if (type) {{
+                statusBox.classList.add(type);
             }}
-            if (current.length > {max_docs}) {{
-                statusBox.innerHTML = '<span class="error">单次任务最多 100 篇论文。</span>';
-                current.splice({max_docs});
-            }}
-            const dt = new DataTransfer();
-            current.forEach(file => dt.items.add(file));
-            documentsInput.files = dt.files;
-            renderDocuments();
-        }});
+        }};
 
-        handleDrop(specDropArea, files => {{
-            const file = Array.from(files).find(f => f.name.toLowerCase().endsWith('.xlsx'));
-            if (file) {{
-                setSpecFile(file);
+        const stopPolling = () => {{
+            if (pollTimer) {{
+                clearInterval(pollTimer);
+                pollTimer = null;
             }}
-        }});
+        }};
 
-        document.querySelectorAll('.browse-link').forEach(link => {{
-            link.addEventListener('click', () => {{
-                const target = link.getAttribute('data-target');
-                if (target === 'documents') {{
-                    documentsInput.click();
-                }} else if (target === 'spec') {{
-                    specInput.click();
+        const renderJobStatus = (payload) => {{
+            if (!payload) {{
+                jobStatus.innerHTML = '<p class="note">暂无任务记录。</p>';
+                return;
+            }}
+
+            const rows = payload.documents.map((doc) => {{
+                const status = doc.status || 'pending';
+                const tagClass = `status-tag ${{status}}`;
+                const detail = doc.status_detail ? `<div class="note">${{doc.status_detail}}</div>` : '';
+                const error = doc.error_message ? `<div class="note" style="color:#b91c1c;">${{doc.error_message}}</div>` : '';
+                return `
+                    <tr>
+                        <td>${{doc.original_filename}}</td>
+                        <td><span class="${{tagClass}}">${{status}}</span></td>
+                        <td>${{doc.attempt_count ?? 0}}</td>
+                    </tr>
+                    ${{detail}}
+                    ${{error}}
+                `;
+            }}).join('');
+
+            const downloadLink = payload.result_download_url
+                ? `<p class="downloads"><a href="${{payload.result_download_url}}">下载提取结果 (XLSX)</a></p>`
+                : '';
+            const statusDetail = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
+            const errorBlock = payload.error_message ? `<p class="note" style="color:#b91c1c;">${{payload.error_message}}</p>` : '';
+
+            jobStatus.innerHTML = `
+                <div class="status">
+                    <p><strong>任务状态：</strong> ${{payload.status}}</p>
+                    ${{statusDetail}}
+                    ${{errorBlock}}
+                    <table class="job-table">
+                        <thead><tr><th>文件名</th><th>状态</th><th>尝试次数</th></tr></thead>
+                        <tbody>${{rows}}</tbody>
+                    </table>
+                    ${{downloadLink}}
+                </div>
+            `;
+        }};
+
+        const fetchJobStatus = async (url) => {{
+            try {{
+                const response = await fetch(url, {{ headers: {{ 'Accept': 'application/json' }} }});
+                if (!response.ok) {{
+                    throw new Error('状态查询失败');
                 }}
-            }});
-        }});
+                const payload = await response.json();
+                renderJobStatus(payload);
 
-        documentsInput.addEventListener('change', renderDocuments);
-        specInput.addEventListener('change', renderSpec);
+                if (payload.status === '{STATUS_COMPLETED}' || payload.status === '{STATUS_FAILED}') {{
+                    stopPolling();
+                }}
+            }} catch (error) {{
+                stopPolling();
+                setStatus('轮询失败：' + error.message, 'error');
+            }}
+        }};
 
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
-            statusBox.textContent = '';
 
-            const pdfs = Array.from(documentsInput.files);
-            if (pdfs.length === 0) {{
-                statusBox.innerHTML = '<span class="error">请至少上传一篇 PDF 论文。</span>';
+            if (!documentsInput || documentsInput.files.length === 0) {{
+                setStatus('请至少上传一篇 PDF。', 'error');
                 return;
             }}
-            if (pdfs.length > {max_docs}) {{
-                statusBox.innerHTML = '<span class="error">单次任务最多 100 篇论文。</span>';
+            if (documentsInput.files.length > {MAX_DOCUMENTS}) {{
+                setStatus('上传的论文数量超过上限。', 'error');
                 return;
             }}
-            if (!specInput.files[0]) {{
-                statusBox.innerHTML = '<span class="error">请提供字段定义表 XLSX。</span>';
+            if (!specInput || specInput.files.length === 0) {{
+                setStatus('请上传字段定义表。', 'error');
                 return;
             }}
 
-            const formData = new FormData();
-            pdfs.forEach(file => formData.append('documents', file));
-            formData.append('spec', specInput.files[0]);
+            stopPolling();
+            setStatus('正在上传文件...', null);
 
-            form.querySelector('button').disabled = true;
-            statusBox.innerHTML = '任务提交中，请稍候…';
+            const formData = new FormData(form);
 
             try {{
                 const response = await fetch('/tools/infoextract/jobs', {{
@@ -460,109 +414,37 @@ async fn info_extract_page(
 
                 if (!response.ok) {{
                     const payload = await response.json().catch(() => ({{ message: '提交失败。' }}));
-                    statusBox.innerHTML = `<span class="error">${{payload.message || '提交失败。'}}</span>`;
-                    form.querySelector('button').disabled = false;
+                    setStatus(payload.message || '提交失败。', 'error');
                     return;
                 }}
 
                 const payload = await response.json();
-                statusBox.innerHTML = '<span class="success">任务已创建，正在处理。</span>';
-                startPolling(payload.status_url);
-            }} catch (err) {{
-                statusBox.innerHTML = '<span class="error">网络请求失败，请稍后重试。</span>';
-            }} finally {{
-                form.querySelector('button').disabled = false;
+                setStatus('任务已创建，正在处理...', 'success');
+                fetchJobStatus(payload.status_url);
+                pollTimer = setInterval(() => fetchJobStatus(payload.status_url), 4000);
+                form.reset();
+                if (documentsInput) {{
+                    documentsInput.value = '';
+                    documentsInput.dispatchEvent(new Event('change'));
+                }}
+                if (specInput) {{
+                    specInput.value = '';
+                    specInput.dispatchEvent(new Event('change'));
+                }}
+            }} catch (error) {{
+                setStatus('提交失败：' + error.message, 'error');
             }}
         }});
-
-        function startPolling(url) {{
-            if (pollTimer) {{
-                clearInterval(pollTimer);
-            }}
-            fetchStatus(url);
-            pollTimer = setInterval(() => fetchStatus(url), 3500);
-        }}
-
-        async function fetchStatus(url) {{
-            if (!url) return;
-            try {{
-                const response = await fetch(url);
-                if (!response.ok) {{
-                    jobStatus.innerHTML = '<p class="error">获取任务状态失败。</p>';
-                    return;
-                }}
-                const payload = await response.json();
-                renderStatus(payload);
-                if (payload.status === '{completed}' || payload.status === '{failed}') {{
-                    clearInterval(pollTimer);
-                    pollTimer = null;
-                }}
-            }} catch (err) {{
-                jobStatus.innerHTML = '<p class="error">获取任务状态失败。</p>';
-            }}
-        }}
-
-        function renderStatus(payload) {{
-            const rows = payload.documents.map(doc => {{
-                const detail = doc.status_detail ? `<div>${{doc.status_detail}}</div>` : '';
-                const error = doc.error_message ? `<div class="error">${{doc.error_message}}</div>` : '';
-                return `
-                    <tr>
-                        <td>${{doc.original_filename}}</td>
-                        <td><span class="status-tag ${{doc.status}}">${{translateStatus(doc.status)}}</span></td>
-                        <td>重试次数：${{doc.attempt_count}}</td>
-                        <td>${{detail}}${{error}}</td>
-                    </tr>
-                `;
-            }}).join('');
-
-            const download = payload.result_download_url
-                ? `<div class="downloads"><a href="${{payload.result_download_url}}">下载提取结果 XLSX</a></div>`
-                : '';
-
-            const overallError = payload.error_message
-                ? `<p class="error">${{payload.error_message}}</p>`
-                : '';
-
-            jobStatus.innerHTML = `
-                <p>任务 ID：<code>${{payload.job_id}}</code></p>
-                <p>状态：<span class="status-tag ${{payload.status}}">${{translateStatus(payload.status)}}</span></p>
-                ${{download}}
-                ${{overallError}}
-                <table class="job-table">
-                    <thead>
-                        <tr>
-                            <th>文件名</th>
-                            <th>状态</th>
-                            <th>尝试次数</th>
-                            <th>详情</th>
-                        </tr>
-                    </thead>
-                    <tbody>${{rows}}</tbody>
-                </table>
-            `;
-        }}
-
-        function translateStatus(status) {{
-            switch (status) {{
-                case '{pending}': return '排队中';
-                case '{processing}': return '处理中';
-                case '{completed}': return '已完成';
-                case '{failed}': return '失败';
-                default: return status;
-            }}
-        }}
     </script>
 </body>
 </html>"#,
-        username = username,
+        upload_styles = upload_styles,
+        docs_widget = docs_widget,
+        spec_widget = spec_widget,
+        upload_script = upload_script,
         admin_link = admin_link,
+        username = username,
         footer = footer,
-        pending = STATUS_PENDING,
-        processing = STATUS_PROCESSING,
-        completed = STATUS_COMPLETED,
-        failed = STATUS_FAILED,
-        max_docs = MAX_DOCUMENTS,
     );
 
     Ok(Html(html))
@@ -571,7 +453,7 @@ async fn info_extract_page(
 async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
     let user = fetch_session_user(&state, &jar).await.map_err(|_| {
         (
@@ -586,200 +468,133 @@ async fn create_job(
 
     let job_id = Uuid::new_v4();
     let job_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
-    tokio_fs::create_dir_all(&job_dir)
+
+    let docs_config = FileFieldConfig::new(
+        "documents",
+        &["pdf"],
+        MAX_DOCUMENTS,
+        FileNaming::Indexed {
+            prefix: "paper_",
+            pad_width: 3,
+        },
+    )
+    .with_min_files(1);
+    let spec_config = FileFieldConfig::new(
+        "spec",
+        &["xlsx"],
+        1,
+        FileNaming::PrefixOnly { prefix: "spec_" },
+    )
+    .with_min_files(1);
+
+    let upload = match process_upload_form(multipart, &job_dir, &[docs_config, spec_config]).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let _ = tokio_fs::remove_dir_all(&job_dir).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new(err.message().to_string())),
+            ));
+        }
+    };
+
+    let documents: Vec<_> = upload.files_for("documents").cloned().collect();
+    if documents.is_empty() {
+        let _ = tokio_fs::remove_dir_all(&job_dir).await;
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new("请至少上传一篇 PDF 论文。")),
+        ));
+    }
+
+    if documents.is_empty() {
+        let _ = tokio_fs::remove_dir_all(&job_dir).await;
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new("请至少上传一篇 PDF 论文。")),
+        ));
+    }
+
+    let spec_file = match upload.first_file_for("spec").cloned() {
+        Some(file) => file,
+        None => {
+            let _ = tokio_fs::remove_dir_all(&job_dir).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new("请上传字段定义表 XLSX。")),
+            ));
+        }
+    };
+
+    let spec_bytes = tokio_fs::read(&spec_file.stored_path)
+        .await
+        .map_err(|err| internal_error(err.into()))?;
+    let fields = match parse_extraction_spec(&spec_bytes) {
+        Ok(fields) => fields,
+        Err(err) => {
+            let _ = tokio_fs::remove_dir_all(&job_dir).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new(format!("字段定义表格式错误：{}", err))),
+            ));
+        }
+    };
+
+    let pool = state.pool();
+
+    if let Err(err) =
+        usage::ensure_within_limits(&pool, user.id, MODULE_INFO_EXTRACT, documents.len() as i64)
+            .await
+    {
+        let _ = tokio_fs::remove_dir_all(&job_dir).await;
+        return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
+    }
+
+    let mut transaction = pool
+        .begin()
         .await
         .map_err(|err| internal_error(err.into()))?;
 
-    let result = async {
-        let mut documents: Vec<UploadedDocument> = Vec::new();
-        let mut spec_bytes: Option<Vec<u8>> = None;
-        let mut spec_filename: Option<String> = None;
-        let mut extraction_fields: Option<Vec<ExtractionField>> = None;
-        let mut file_index = 0usize;
+    sqlx::query(
+        "INSERT INTO info_extract_jobs (id, user_id, status, spec_filename, spec_path)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(job_id)
+    .bind(user.id)
+    .bind(STATUS_PENDING)
+    .bind(&spec_file.original_name)
+    .bind(spec_file.stored_path.to_string_lossy().to_string())
+    .execute(&mut *transaction)
+    .await
+    .map_err(|err| internal_error(err.into()))?;
 
-        while let Some(field) = multipart
-            .next_field()
-            .await
-            .map_err(|err| internal_error(err.into()))?
-        {
-            let name = field.name().map(|s| s.to_string());
-
-            match name.as_deref() {
-                Some("documents") => {
-                    let Some(filename) = field.file_name().map(|s| s.to_string()) else {
-                        continue;
-                    };
-                    let safe_name = sanitize(&filename);
-                    let ext = Path::new(&safe_name)
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    if ext != "pdf" {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            Json(ApiError::new("仅支持上传 PDF 文件。")),
-                        ));
-                    }
-
-                    let stored_path = job_dir.join(format!("paper_{file_index:03}_{safe_name}"));
-                    file_index += 1;
-
-                    let mut file = tokio_fs::File::create(&stored_path)
-                        .await
-                        .map_err(|err| internal_error(err.into()))?;
-                    let bytes = field
-                        .bytes()
-                        .await
-                        .map_err(|err| internal_error(err.into()))?;
-                    file.write_all(&bytes)
-                        .await
-                        .map_err(|err| internal_error(err.into()))?;
-                    file.flush()
-                        .await
-                        .map_err(|err| internal_error(err.into()))?;
-
-                    documents.push(UploadedDocument {
-                        stored_path,
-                        original_name: filename,
-                    });
-                }
-                Some("spec") => {
-                    if spec_bytes.is_some() {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            Json(ApiError::new("仅允许上传 1 个字段定义表。")),
-                        ));
-                    }
-
-                    let filename = field
-                        .file_name()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "spec.xlsx".to_string());
-                    let safe_name = sanitize(&filename);
-                    if !safe_name.to_lowercase().ends_with(".xlsx") {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            Json(ApiError::new("字段定义表必须为 XLSX 格式。")),
-                        ));
-                    }
-
-                    let bytes = field
-                        .bytes()
-                        .await
-                        .map_err(|err| internal_error(err.into()))?;
-
-                    let bytes_vec = bytes.to_vec();
-
-                    let fields = parse_extraction_spec(&bytes_vec).map_err(|err| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(ApiError::new(format!("字段定义表格式错误：{}", err))),
-                        )
-                    })?;
-
-                    spec_bytes = Some(bytes_vec);
-                    spec_filename = Some(safe_name);
-                    extraction_fields = Some(fields);
-                }
-                _ => {}
-            }
-        }
-
-        if documents.is_empty() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiError::new("请至少上传一篇 PDF 论文。")),
-            ));
-        }
-
-        if documents.len() > MAX_DOCUMENTS {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ApiError::new("单次任务最多 100 篇 PDF。")),
-            ));
-        }
-
-        let spec_bytes = spec_bytes.ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ApiError::new("请上传字段定义表 XLSX。")),
-            )
-        })?;
-        let spec_filename = spec_filename.unwrap_or_else(|| "spec.xlsx".to_string());
-        let fields = extraction_fields.expect("spec bytes guarantee fields");
-
-        let spec_path = job_dir.join(&spec_filename);
-        tokio_fs::write(&spec_path, &spec_bytes)
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-
-        let pool = state.pool();
-
-        if let Err(err) = usage::ensure_within_limits(
-            &pool,
-            user.id,
-            MODULE_INFO_EXTRACT,
-            documents.len() as i64,
-        )
-        .await
-        {
-            return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
-        }
-
-        let mut transaction = pool
-            .begin()
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-
+    for (index, file) in documents.iter().enumerate() {
         sqlx::query(
-            "INSERT INTO info_extract_jobs (id, user_id, status, spec_filename, spec_path)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO info_extract_documents (id, job_id, ordinal, original_filename, source_path, status)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
+        .bind(Uuid::new_v4())
         .bind(job_id)
-        .bind(user.id)
+        .bind(index as i32)
+        .bind(&file.original_name)
+        .bind(file.stored_path.to_string_lossy().to_string())
         .bind(STATUS_PENDING)
-        .bind(&spec_filename)
-        .bind(spec_path.to_string_lossy().to_string())
         .execute(&mut *transaction)
         .await
         .map_err(|err| internal_error(err.into()))?;
-
-        for (ordinal, document) in documents.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO info_extract_documents (id, job_id, ordinal, original_filename, source_path, status)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .bind(Uuid::new_v4())
-            .bind(job_id)
-            .bind(ordinal as i32)
-            .bind(&document.original_name)
-            .bind(document.stored_path.to_string_lossy().to_string())
-            .bind(STATUS_PENDING)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-        }
-
-        transaction
-            .commit()
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-
-        spawn_job_worker(state.clone(), job_id, fields);
-
-        Ok(Json(JobSubmissionResponse {
-            job_id,
-            status_url: format!("/api/infoextract/jobs/{}", job_id),
-        }))
-    }
-    .await;
-
-    if result.is_err() {
-        let _ = tokio_fs::remove_dir_all(&job_dir).await;
     }
 
-    result
+    transaction
+        .commit()
+        .await
+        .map_err(|err| internal_error(err.into()))?;
+
+    spawn_job_worker(state.clone(), job_id, fields);
+
+    Ok(Json(JobSubmissionResponse {
+        job_id,
+        status_url: format!("/api/infoextract/jobs/{}", job_id),
+    }))
 }
 
 async fn job_status(

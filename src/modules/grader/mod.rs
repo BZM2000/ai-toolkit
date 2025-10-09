@@ -17,17 +17,20 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use pdf_extract::extract_text as extract_pdf_text;
 use quick_xml::{Reader as XmlReader, events::Event};
-use sanitize_filename::sanitize;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tokio::{fs as tokio_fs, io::AsyncWriteExt, time::sleep};
+use tokio::{fs as tokio_fs, time::sleep};
 use tracing::error;
 use uuid::Uuid;
 use zip::ZipArchive;
 
 mod admin;
 
+use crate::web::{
+    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
+    process_upload_form, render_upload_widget,
+};
 use crate::{
     AppState, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow, escape_html,
     fetch_journal_references, fetch_journal_topic_scores, fetch_journal_topics,
@@ -228,6 +231,14 @@ pub async fn grader_page(
     } else {
         ""
     };
+    let upload_styles = UPLOAD_WIDGET_STYLES;
+    let upload_widget = render_upload_widget(
+        &UploadWidgetConfig::new("grader-upload", "grader-file", "file", "稿件文件")
+            .with_description("支持上传 PDF、DOCX 或 TXT 稿件。")
+            .with_note("仅支持单个 PDF / DOCX / TXT 文件。")
+            .with_accept(".pdf,.docx,.txt"),
+    );
+    let upload_script = UPLOAD_WIDGET_SCRIPT;
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -248,13 +259,9 @@ pub async fn grader_page(
         section {{ margin-bottom: 2.5rem; }}
         .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
         label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
-        input[type="file"] {{ display: none; }}
         button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
         button:hover {{ background: #1d4ed8; }}
         button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
-        .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
-        .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
-        .drop-zone strong {{ color: #1d4ed8; }}
         .note {{ color: #475569; font-size: 0.95rem; margin-top: 0.5rem; }}
         .status-box {{ margin-top: 1rem; padding: 1rem; border-radius: 12px; background: #f1f5f9; color: #0f172a; min-height: 3rem; }}
         .results {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06); }}
@@ -265,6 +272,7 @@ pub async fn grader_page(
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
         .admin-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #0f172a; background: #fee2e2; border: 1px solid #fecaca; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; }}
         .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
+        {upload_styles}
     </style>
 </head>
 <body>
@@ -282,12 +290,7 @@ pub async fn grader_page(
         <section class="panel">
             <h2>提交稿件</h2>
             <form id="grader-form">
-                <label for="file-input">稿件文件</label>
-                <div id="drop-area" class="drop-zone">
-                    <p><strong>拖拽文件</strong>到此处，或<span class="browse-link">点击选择</span>文件。</p>
-                    <p class="note">仅支持单个文件，格式限 PDF / DOCX / TXT。</p>
-                    <input id="file-input" name="file" type="file" accept=".pdf,.docx,.txt" required>
-                </div>
+                {upload_widget}
                 <button type="submit">开始评估</button>
             </form>
             <div id="status-box" class="status-box">等待上传。</div>
@@ -300,10 +303,10 @@ pub async fn grader_page(
         </section>
         {footer}
     </main>
+    {upload_script}
     <script>
         const form = document.getElementById('grader-form');
-        const dropArea = document.getElementById('drop-area');
-        const fileInput = document.getElementById('file-input');
+        const fileInput = document.getElementById('grader-file');
         const statusBox = document.getElementById('status-box');
         const resultsSection = document.getElementById('results-section');
         const scoreSummary = document.getElementById('score-summary');
@@ -412,31 +415,17 @@ pub async fn grader_page(
             }}, 3000);
         }};
 
-        const handleFiles = (list) => {{
-            if (!list || list.length === 0) return;
-            const dt = new DataTransfer();
-            const file = list[0];
-            dt.items.add(file);
-            fileInput.files = dt.files;
-            updateStatus(`已选择文件：${{file.name}}`);
+        const handleFileSelection = () => {{
+            if (!fileInput || fileInput.files.length === 0) {{
+                updateStatus('等待上传。');
+                return;
+            }}
+            updateStatus(`已选择文件：${{fileInput.files[0].name}}`);
         }};
 
-        dropArea.addEventListener('click', () => fileInput.click());
-        dropArea.addEventListener('dragenter', (event) => {{ event.preventDefault(); dropArea.classList.add('dragover'); }});
-        dropArea.addEventListener('dragover', (event) => event.preventDefault());
-        dropArea.addEventListener('dragleave', (event) => {{
-            event.preventDefault();
-            const related = event.relatedTarget;
-            if (!related || !dropArea.contains(related)) {{
-                dropArea.classList.remove('dragover');
-            }}
-        }});
-        dropArea.addEventListener('drop', (event) => {{
-            event.preventDefault();
-            dropArea.classList.remove('dragover');
-            handleFiles(event.dataTransfer.files);
-        }});
-        fileInput.addEventListener('change', () => handleFiles(fileInput.files));
+        if (fileInput) {{
+            fileInput.addEventListener('change', handleFileSelection);
+        }}
 
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
@@ -446,8 +435,7 @@ pub async fn grader_page(
             }}
             resetResults();
             updateStatus('正在上传稿件...');
-            const formData = new FormData();
-            formData.append('file', fileInput.files[0]);
+            const formData = new FormData(form);
 
             try {{
                 const res = await fetch('/tools/grader/jobs', {{ method: 'POST', body: formData }});
@@ -457,8 +445,14 @@ pub async fn grader_page(
                     return;
                 }}
                 const data = await res.json();
-                updateStatus('稿件已提交，正在评估...');
-                pollJob(data.status_url);
+                handleStatusPayload(data);
+                if (fileInput) {{
+                    fileInput.value = '';
+                    fileInput.dispatchEvent(new Event('change'));
+                }}
+                if (data.status_url) {{
+                    pollJob(data.status_url);
+                }}
             }} catch (err) {{
                 updateStatus('提交失败：' + err.message);
             }}
@@ -466,6 +460,9 @@ pub async fn grader_page(
     </script>
 </body>
 </html>"#,
+        upload_styles = upload_styles,
+        upload_widget = upload_widget,
+        upload_script = upload_script,
         username = escape_html(&user.username),
         footer = footer,
         admin_link = admin_link,
@@ -477,7 +474,7 @@ pub async fn grader_page(
 async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
     let user = require_user(&state, &jar)
         .await
@@ -494,61 +491,37 @@ async fn create_job(
     let job_id = Uuid::new_v4();
     let doc_id = Uuid::new_v4();
     let job_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
-    tokio_fs::create_dir_all(&job_dir)
-        .await
-        .map_err(|err| internal_error(err.into()))?;
 
-    let mut stored_file: Option<(String, PathBuf, bool)> = None;
+    let file_config = FileFieldConfig::new(
+        "file",
+        &["pdf", "docx", "txt"],
+        1,
+        FileNaming::PrefixOnly { prefix: "source_" },
+    )
+    .with_min_files(1);
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| internal_error(err.into()))?
-    {
-        if field.name() != Some("file") {
-            continue;
-        }
-
-        let Some(filename) = field.file_name().map(|s| s.to_string()) else {
-            continue;
-        };
-        let safe_name = sanitize(&filename);
-        let ext = Path::new(&safe_name)
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        if !matches!(ext.as_str(), "pdf" | "docx" | "txt") {
+    let upload = match process_upload_form(multipart, &job_dir, &[file_config]).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let _ = tokio_fs::remove_dir_all(&job_dir).await;
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new("仅支持 PDF、DOCX 或 TXT 文件。")),
+                Json(ApiError::new(err.message().to_string())),
             ));
         }
-
-        let stored_path = job_dir.join(format!("source_{}", safe_name));
-        let mut file = tokio_fs::File::create(&stored_path)
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-        let bytes = field
-            .bytes()
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-        file.write_all(&bytes)
-            .await
-            .map_err(|err| internal_error(err.into()))?;
-
-        stored_file = Some((filename, stored_path, ext == "docx"));
-        break;
-    }
-
-    let Some((original_filename, stored_path, is_docx)) = stored_file else {
-        let _ = tokio_fs::remove_dir_all(&job_dir).await;
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError::new("请提供稿件文件。")),
-        ));
     };
+
+    let files: Vec<_> = upload.files_for("file").cloned().collect();
+    let file = files
+        .first()
+        .expect("file upload guaranteed by process_upload_form");
+
+    let is_docx = file
+        .original_name
+        .rsplit('.')
+        .next()
+        .map(|ext| ext.eq_ignore_ascii_case("docx"))
+        .unwrap_or(false);
 
     let mut transaction = state
         .pool()
@@ -569,8 +542,8 @@ async fn create_job(
     )
     .bind(doc_id)
     .bind(job_id)
-    .bind(&original_filename)
-    .bind(stored_path.to_string_lossy().to_string())
+    .bind(&file.original_name)
+    .bind(file.stored_path.to_string_lossy().to_string())
     .bind(is_docx)
     .bind(STATUS_PENDING)
     .execute(&mut *transaction)

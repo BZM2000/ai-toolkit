@@ -32,10 +32,10 @@
   - `admin_utils.rs`, `data.rs`, `models.rs`, `templates.rs`: shared HTML builders, SQL helpers, and typed query utilities used by dashboard views.
   - `admin/`: feature-specific admin UI submodules (`users.rs`, `usage_groups.rs`, `dashboard.rs`, `glossary.rs`, `journals.rs`, `auth.rs`) plus `types.rs` and `mod.rs` for routing helpers.
 - `src/modules/`: encapsulated tool implementations with their own routers and admin surfaces.
-  - `summarizer/`, `translatedocx/`, `grader/`, `reviewer/`: each exports `mod.rs` (tool router, handlers, background orchestration) and `admin.rs` (settings/prompt management pages).
+  - `summarizer/`, `info_extract/`, `translatedocx/`, `grader/`, `reviewer/`: each exports `mod.rs` (tool router, handlers, background orchestration) and `admin.rs` (settings/prompt management pages).
   - `admin_shared.rs`: reusable styles, layout helpers, and widgets for module admin pages.
   - `mod.rs`: registers module routers with the main application and provides shared traits/enums for module discovery.
-- `migrations/`: ordered Postgres migrations (`0001_init.sql` … `0010_reviewer.sql`) defining users, glossary, job tracking tables, module configuration storage, and usage limit schema.
+- `migrations/`: ordered Postgres migrations (`0001_init.sql` … `0012_info_extract.sql`) defining users, glossary, job tracking tables, module configuration storage, and usage limit schema.
 - `robots.txt`: served for web crawlers via `web::router`.
 - `target/`: Cargo build artifacts (ignored in version control) useful for local compilation caching.
 - `storage/`: runtime directory (ignored by Git) where background jobs persist generated files, summaries, and translated documents.
@@ -43,7 +43,7 @@
 ### Current Web Application Layout (2025-xx)
 - `src/web/` owns all HTTP-facing logic: `state.rs` (shared `AppState`), `landing.rs`, `auth.rs`, and `admin.rs` (user & usage dashboards), plus `data.rs`, `models.rs`, and `templates.rs` for reusable queries and HTML.
 - Module-specific admin pages live alongside each tool (`src/modules/<tool>/admin.rs`) and register their settings routes from the module router; shared styling/widgets sit in `src/modules/admin_shared.rs` and helpers in `src/web/admin_utils.rs`.
-- `src/web/router.rs` builds the Axum `Router`, wiring auth, dashboard, and module routes (summarizer/translatedocx/grader/reviewer) and serves `robots.txt`.
+- `src/web/router.rs` builds the Axum `Router`, wiring auth, dashboard, and module routes (summarizer/infoextract/translatedocx/grader/reviewer) and serves `robots.txt`.
 - `src/main.rs` is now a thin bootstrap: initialize tracing, create `AppState`, call `web::router::build_router`, and start the server.
 - Downstream modules continue to consume shared helpers via re-exports in `src/web/mod.rs` (e.g., glossary/journal fetch helpers, `AppState`, HTML utilities).
 
@@ -62,22 +62,42 @@
 - Build chat turns with `ChatMessage::new(MessageRole::User, "prompt")`; attach files using `FileAttachment::new` (OpenRouter only supports `AttachmentKind::Image | Audio | Pdf`).
 - Call `client.execute(request).await?` to receive `LlmResponse` containing assistant text, provider info, raw JSON, and token counts (approximate when providers omit them).
 
-## DOCX to PDF Conversion
-- **Implementation**: DOCX to PDF conversion is handled by a pure-Rust implementation using the `docx-rs` and `printpdf` crates.
-- **Location**: The conversion logic is located in the `src/utils/docx_to_pdf.rs` module, making it a shared utility that can be used by any module in the toolkit.
-- **Functionality**: The current implementation performs a basic conversion, extracting text from the DOCX and placing it into a PDF. It does not preserve complex formatting, images, or tables.
-- **Usage**:
-  ```rust
-  use crate::utils::docx_to_pdf::convert_docx_to_pdf;
-  use std::path::Path;
+## Shared Upload Utilities (2025-10-09)
+- **Backend** (`src/web/uploads.rs`): standardises multipart parsing and disk writes.
+  - Describe expected file inputs with `FileFieldConfig::new(field, allowed_exts, max_files, FileNaming::Indexed { prefix: "source_", pad_width: 3 })`; chain `.with_min_files(n)` for required uploads.
+  - Create the per-job directory with `ensure_upload_directory(&job_dir).await?`, then call `process_upload_form(multipart, &job_dir, &[config_docs, config_spec]).await?`.
+  - The result `UploadOutcome` exposes `files_for("field")` iterators plus `text_fields` for ancillary inputs (`direction`, `translate`, `language`, etc.). Filenames are sanitised and deduplicated (`foo.pdf`, `foo_1.pdf`, …).
+  - Example scaffold:
+    ```rust
+    use crate::web::{
+        ensure_upload_directory, process_upload_form, FileFieldConfig, FileNaming,
+    };
 
-  async fn example(docx_path: &Path) -> anyhow::Result<()> {
-      let pdf_path = convert_docx_to_pdf(docx_path).await?;
-      // ...
-      Ok(())
-  }
-  ```
-- **Performance**: This pure-Rust approach is significantly faster and more memory-efficient than the previous LibreOffice-based solution, as it avoids the overhead of starting a separate process.
+    ensure_upload_directory(&job_dir).await?;
+    let cfg = FileFieldConfig::new(
+        "files",
+        &["pdf", "docx", "txt"],
+        100,
+        FileNaming::Indexed { prefix: "source_", pad_width: 3 },
+    );
+
+    let uploads = process_upload_form(multipart, &job_dir, &[cfg]).await?;
+    for file in uploads.files_for("files") {
+        tracing::debug!(?file.stored_path, %file.original_name, "queued upload");
+    }
+    ```
+- **Frontend** (`src/web/upload_ui.rs`): shared drop-zone widget for consistent UX.
+  - Embed `UPLOAD_WIDGET_STYLES` in the page `<style>` block and append `UPLOAD_WIDGET_SCRIPT` before `</body>`; the script is idempotent.
+  - Render a picker with `render_upload_widget(&UploadWidgetConfig::new("summarizer-files", "summarizer-input", "files", "上传文件").with_multiple(Some(100)).with_note("最多 100 个文件").with_accept(".pdf,.docx,.txt"))`.
+  - Multi-file widgets show removable chips and enforce the configured limit; single-file widgets auto-collapse to the last selection while keeping the same visual language across modules.
+- Naming strategies:
+  - `FileNaming::Indexed` → `prefix_000_original.ext` (recommended for multi-file jobs like summarizer & info_extract).
+  - `FileNaming::PrefixOnly` → `prefix_original.ext` (single-file modules that prefer a stable prefix before the sanitized name).
+  - `FileNaming::PreserveOriginal` → sanitized filename only (reviewer keeps the user-provided name).
+- Adoption checklist per module:
+  1. Replace the manual `Multipart` loop with `process_upload_form`, persisting DB rows from the returned `SavedFile` metadata.
+  2. Swap the HTML drop-zone for `render_upload_widget`, keeping module-specific controls (checkboxes, selects) outside the widget.
+  3. Remove bespoke CSS/JS once the shared widget is embedded; retain module-specific copy via `UploadWidgetConfig::with_note` or surrounding labels.
 
 ## Model Configuration
 - All module model selections are stored in the `module_configs` table under the `models` JSON column. Administrators manage these values from the dedicated module setting pages inside the dashboard.
@@ -99,6 +119,15 @@
   - `GET /api/summarizer/jobs/{job_id}/combined/{summary|translation}` → combined text downloads.
 - Glossary terms are now persisted in `glossary_terms` as EN -> CN pairs; admins manage them from the dashboard, and translation prompts incorporate the local glossary (no external fetch).
 - Usage accounting: `users.usage_count` increments by successfully processed documents; request is rejected if projected usage would exceed `usage_limit`.
+
+## Info Extract Module
+- Routes mounted under `/tools/infoextract` (HTML form), `/tools/infoextract/jobs` (job creation), `/api/infoextract/jobs/{job_id}` (status polling), and `/api/infoextract/jobs/{job_id}/download/result` (XLSX download).
+- Users upload 1-100 PDF manuscripts plus a required XLSX field-definition template; row 1 supplies field names, row 2 optional descriptions, row 3 optional examples (semicolon separated), and row 4 optional allowed values (mutually exclusive with examples). The template is validated before the job is queued.
+- Backend persists metadata in `info_extract_jobs`/`info_extract_documents`, stores uploads under `storage/infoextract/<job_id>/`, and spawns a worker that processes up to five papers concurrently.
+- Each document text is truncated to 20,000 characters before calling the configured extraction model (default `openrouter/openai/gpt-4o-mini`) with module-level system and response-guidance prompts. The worker retries failed requests up to three times with incremental 1.5 s delays and parses JSON responses into structured values.
+- Successful results are aggregated into `extraction_result.xlsx` with a per-row error column; once generated, the workbook is exposed through the status endpoint for download.
+- Usage tracking logs per-document units and total tokens via `usage::record_usage`; submission is rejected if the projected document count exceeds the user's limits.
+- Admin settings live at `/dashboard/modules/infoextract`, letting administrators update the extraction model and prompts stored in `ModuleSettings` without restarting the service.
 
 ## DOCX Translator Module
 - Routes mounted under `/tools/translatedocx` (HTML form) and `/api/translatedocx` (status/download endpoints).
@@ -135,10 +164,12 @@
 - `migrations/0004_translatedocx.sql` and `0005_docx_direction.sql` track DOCX translation jobs/documents and persist chosen translation direction.
 - `migrations/0006_grader.sql` introduces `grader_jobs`, `grader_documents`, `journal_topics`, `journal_reference_entries`, and `journal_topic_scores`. Journal topics and reference rows are editable from the admin dashboard and are used by the grader module for keyword weighting and threshold adjustments.
 - `migrations/0010_reviewer.sql` adds `reviewer_jobs` (with UUID user_id referencing users table) and `reviewer_documents` (tracking per-round reviews with file paths, status, and error messages).
+- `migrations/0012_info_extract.sql` creates `info_extract_jobs` (tracking owner, spec metadata, status, aggregate tokens/units) and `info_extract_documents` (per-PDF status, parsed JSON, attempt counts, token usage).
 
 ## File System
-- Runtime artifacts persist under `storage/summarizer/`, `storage/translatedocx/`, `storage/grader/`, and `storage/reviewer/`; `.gitignore` ignores the entire `storage/` directory.
+- Runtime artifacts persist under `storage/summarizer/`, `storage/infoextract/`, `storage/translatedocx/`, `storage/grader/`, and `storage/reviewer/`; `.gitignore` ignores the entire `storage/` directory.
 - Summarizer job directories contain `summary_n.txt`, optional `translation_n.txt`, and combined outputs with Markdown-style headings.
+- Info Extract job directories cache the uploaded PDFs, the validated XLSX schema, and the generated `extraction_result.xlsx` workbook.
 - Reviewer job directories contain DOCX files: `round1_review_{1-8}.docx`, `round2_meta_review.docx`, and `round3_final_report.docx`.
 
 ## Docker Deployment
@@ -180,3 +211,17 @@
   - Added migration `0011_global_token_limit.sql` to move `token_limit` onto `usage_groups` and drop the per-module column.
   - Refactored `src/usage.rs` to enforce the global token window while keeping per-module unit limits and future module extensibility.
   - Updated admin dashboard and usage group forms to manage the shared token budget and display per-user totals.
+- 2025-10-09 (Codex agent): Added 信息提取模块 with concurrent schema-driven extraction.
+  - Built `src/modules/info_extract` to validate XLSX field definitions, batch ingest up to 100 PDFs, orchestrate five-way parallel processing with three LLM retries, and emit job summaries as Excel downloads.
+  - Extended configuration (`InfoExtractModels`/`InfoExtractPrompts`), admin UI (`/dashboard/modules/infoextract`), and landing/router wiring; registered `MODULE_INFO_EXTRACT` for rate limiting and usage accounting.
+  - Created `migrations/0012_info_extract.sql`, ensured storage under `storage/infoextract/`, and exposed `/api/infoextract/jobs/{id}` plus `/download/result` endpoints for polling and retrieval.
+- 2025-10-10 (Codex agent): Introduced shared upload utilities.
+- 2025-10-10 (Codex agent): Migrated summarizer、DOCX translator、grader模块到共享上传工具。
+- 2025-10-10 (Codex agent): 信息提取模块接入共享上传工具（多文件论文 + 单 XLSX 字段表）。
+- 2025-10-10 (Codex agent): 审稿助手模块改用共享上传组件。
+  - `process_upload_form` 负责稿件上传并在任务建好后迁移至最终目录；保留 DOCX→PDF 转换流程。
+  - 页面使用 `render_upload_widget`，脚本仅处理语言选择、轮询与状态提示。
+  - 后端改用 `process_upload_form` 配置双字段，去掉手写 multipart；字段表仍落盘并即时解析。
+  - 前端采用两个 `render_upload_widget`，脚本保留轮询逻辑但移除自定义拖拽 UI。
+  - 服务端改用 `process_upload_form`/`FileFieldConfig` 统一校验与存储，清理手写 multipart 循环。
+  - 前端页面统一引用 `render_upload_widget` 与共享脚本，移除自定义拖拽样式/逻辑。

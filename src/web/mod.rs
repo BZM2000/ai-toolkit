@@ -7,6 +7,8 @@ pub mod models;
 pub mod router;
 pub mod state;
 pub mod templates;
+pub mod upload_ui;
+pub mod uploads;
 
 pub use auth::{AuthUser, SESSION_COOKIE, SESSION_TTL_DAYS};
 pub use data::{
@@ -16,3 +18,12 @@ pub use data::{
 pub use models::{GlossaryTermRow, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow};
 pub use state::AppState;
 pub use templates::{escape_html, render_footer, render_login_page};
+#[allow(unused_imports)]
+pub use upload_ui::{
+    UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig, render_upload_widget,
+};
+#[allow(unused_imports)]
+pub use uploads::{
+    FileFieldConfig, FileNaming, SavedFile, UploadError, UploadOutcome, UploadResult,
+    ensure_directory as ensure_upload_directory, process_upload_form,
+};

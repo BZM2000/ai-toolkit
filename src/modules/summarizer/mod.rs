@@ -20,13 +20,17 @@ use pdf_extract::extract_text as extract_pdf_text;
 use quick_xml::{Reader as XmlReader, events::Event};
 use sanitize_filename::sanitize;
 use serde::Serialize;
-use tokio::{fs as tokio_fs, io::AsyncWriteExt, sync::Semaphore, time::sleep};
+use tokio::{fs as tokio_fs, sync::Semaphore, time::sleep};
 use tracing::{error, warn};
 use uuid::Uuid;
 use zip::ZipArchive;
 
 mod admin;
 
+use crate::web::{
+    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
+    process_upload_form, render_upload_widget,
+};
 use crate::{
     AppState, GlossaryTermRow,
     config::SummarizerPrompts,
@@ -83,6 +87,15 @@ async fn summarizer_page(
     } else {
         ""
     };
+    let upload_styles = UPLOAD_WIDGET_STYLES;
+    let upload_widget = render_upload_widget(
+        &UploadWidgetConfig::new("summarizer-upload", "files", "files", "上传文件")
+            .with_description("支持上传 PDF、DOCX 或 TXT 文档。")
+            .with_multiple(Some(100))
+            .with_note("每个任务最多可提交 100 个文件。")
+            .with_accept(".pdf,.docx,.txt"),
+    );
+    let upload_script = UPLOAD_WIDGET_SCRIPT;
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -102,8 +115,8 @@ async fn summarizer_page(
         section {{ margin-bottom: 2.5rem; }}
         .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
         label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
-        input[type="file"], select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
-        input[type="file"]:focus, select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
+        select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
         input[type="checkbox"] {{ margin-right: 0.5rem; }}
         button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
         button:hover {{ background: #1d4ed8; }}
@@ -118,25 +131,15 @@ async fn summarizer_page(
         .admin-link:hover {{ background: #fecaca; border-color: #fca5a5; }}
         .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
         .downloads a:hover {{ text-decoration: underline; }}
-        .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
-        .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
-        .drop-zone strong {{ color: #1d4ed8; }}
-        .drop-zone input[type="file"] {{ display: none; }}
-        .browse-link {{ color: #2563eb; text-decoration: underline; cursor: pointer; }}
-        .file-list {{ margin: 1rem 0; max-height: 300px; overflow-y: auto; }}
-        .file-item {{ display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; border: 1px solid #e2e8f0; border-radius: 6px; margin-bottom: 0.5rem; background: #ffffff; flex-wrap: wrap; gap: 0.5rem; }}
-        .file-name {{ flex: 1; min-width: 0; word-break: break-word; font-size: 0.9rem; }}
-        .file-remove {{ background: #dc2626; color: white; border: none; padding: 0.25rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.85rem; flex-shrink: 0; }}
-        .file-remove:hover {{ background: #b91c1c; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
         @media (max-width: 768px) {{
             header {{ padding: 1.5rem 1rem; }}
             main {{ padding: 1.5rem 1rem; }}
             .header-bar {{ flex-direction: column; align-items: flex-start; }}
-            .drop-zone {{ padding: 1.5rem 1rem; }}
             table {{ font-size: 0.9rem; }}
             th, td {{ padding: 0.5rem; }}
         }}
+        {upload_styles}
     </style>
 </head>
 <body>
@@ -154,13 +157,7 @@ async fn summarizer_page(
         <section class="panel">
             <h2>发起新任务</h2>
             <form id="summarizer-form">
-                <label for="files">上传文件</label>
-                <div id="drop-area" class="drop-zone">
-                    <p><strong>拖拽文件</strong>到此处，或<span class="browse-link">点击选择</span>文件。</p>
-                    <p class="note">每个任务最多可提交 100 个文件。</p>
-                    <input id="files" name="files" type="file" multiple accept=".pdf,.docx,.txt" required>
-                </div>
-                <div id="file-list" class="file-list"></div>
+                {upload_widget}
                 <label for="document-type">文档类型</label>
                 <select id="document-type" name="document_type">
                     <option value="research">科研论文</option>
@@ -177,124 +174,25 @@ async fn summarizer_page(
         </section>
         {footer}
     </main>
+    {upload_script}
     <script>
         const form = document.getElementById('summarizer-form');
         const statusBox = document.getElementById('submission-status');
         const jobStatus = document.getElementById('job-status');
-        const dropArea = document.getElementById('drop-area');
         const fileInput = document.getElementById('files');
-        const fileListEl = document.getElementById('file-list');
         let activeJobId = null;
         let statusTimer = null;
-
-        const updateFileList = () => {{
-            const files = Array.from(fileInput.files);
-
-            if (files.length === 0) {{
-                fileListEl.innerHTML = '';
-                statusBox.textContent = '';
-                return;
-            }}
-
-            if (files.length > 100) {{
-                statusBox.innerHTML = '<span style="color: #dc2626;">文件数量超过限制（最多 100 个）。请移除一些文件。</span>';
-            }} else {{
-                statusBox.textContent = `已选择 ${{files.length}} 个文件。`;
-            }}
-
-            fileListEl.innerHTML = files.map((file, index) => `
-                <div class="file-item">
-                    <span class="file-name">${{escapeHtml(file.name)}}</span>
-                    <button type="button" class="file-remove" data-index="${{index}}">移除</button>
-                </div>
-            `).join('');
-
-            // Add event listeners for remove buttons
-            document.querySelectorAll('.file-remove').forEach(btn => {{
-                btn.addEventListener('click', (e) => {{
-                    const index = parseInt(e.target.dataset.index);
-                    removeFile(index);
-                }});
-            }});
-        }};
-
-        const removeFile = (index) => {{
-            const dt = new DataTransfer();
-            const files = Array.from(fileInput.files);
-
-            files.forEach((file, i) => {{
-                if (i !== index) {{
-                    dt.items.add(file);
-                }}
-            }});
-
-            fileInput.files = dt.files;
-            updateFileList();
-        }};
-
-        const escapeHtml = (str) => {{
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
-        }};
-
-        const handleFiles = (list) => {{
-            if (!list || !list.length) {{
-                return;
-            }}
-
-            const dt = new DataTransfer();
-            // Add existing files first
-            Array.from(fileInput.files).forEach(file => dt.items.add(file));
-            // Add new files
-            Array.from(list).forEach(file => dt.items.add(file));
-
-            fileInput.files = dt.files;
-            updateFileList();
-        }};
-
-        fileInput.addEventListener('change', () => {{
-            updateFileList();
-        }});
-
-        dropArea.addEventListener('click', () => {{
-            fileInput.click();
-        }});
-
-        dropArea.addEventListener('dragenter', (event) => {{
-            event.preventDefault();
-            dropArea.classList.add('dragover');
-        }});
-
-        dropArea.addEventListener('dragover', (event) => {{
-            event.preventDefault();
-        }});
-
-        dropArea.addEventListener('dragleave', (event) => {{
-            event.preventDefault();
-            const related = event.relatedTarget;
-            if (!related || !dropArea.contains(related)) {{
-                dropArea.classList.remove('dragover');
-            }}
-        }});
-
-        dropArea.addEventListener('drop', (event) => {{
-            event.preventDefault();
-            dropArea.classList.remove('dragover');
-            handleFiles(event.dataTransfer.files);
-        }});
 
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
 
-            // Validate file count
-            if (fileInput.files.length === 0) {{
+            if (!fileInput || fileInput.files.length === 0) {{
                 statusBox.innerHTML = '<span style="color: #dc2626;">请至少选择一个文件。</span>';
                 return;
             }}
 
             if (fileInput.files.length > 100) {{
-                statusBox.innerHTML = '<span style="color: #dc2626;">文件数量超过限制（最多 100 个）。请移除一些文件。</span>';
+                statusBox.innerHTML = '<span style="color: #dc2626;">文件数量超过限制（最多 100 个）。</span>';
                 return;
             }}
 
@@ -316,9 +214,11 @@ async fn summarizer_page(
                 const payload = await response.json();
                 activeJobId = payload.job_id;
                 statusBox.innerHTML = '<span style="color: #16a34a;">任务已入队，正在监控进度...</span>';
-                // Clear file list after successful submission
-                fileInput.value = '';
-                fileListEl.innerHTML = '';
+                form.reset();
+                if (fileInput) {{
+                    fileInput.value = '';
+                    fileInput.dispatchEvent(new Event('change'));
+                }}
                 pollStatus();
             }} catch (err) {{
                 console.error(err);
@@ -399,6 +299,9 @@ async fn summarizer_page(
     </script>
 </body>
 </html>"#,
+        upload_styles = upload_styles,
+        upload_widget = upload_widget,
+        upload_script = upload_script,
         username = escape_html(&user.username),
         completed = STATUS_COMPLETED,
         failed = STATUS_FAILED,
@@ -412,7 +315,7 @@ async fn summarizer_page(
 async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
     let user = require_user(&state, &jar)
         .await
@@ -420,95 +323,44 @@ async fn create_job(
 
     let mut document_type = DocumentKind::ResearchArticle;
     let mut translate = true;
-    let mut files: Vec<UploadedFile> = Vec::new();
-    let mut file_index = 0;
 
     ensure_storage_root()
         .await
         .map_err(|err| internal_error(err.into()))?;
     let job_id = Uuid::new_v4();
     let job_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
-    tokio_fs::create_dir_all(&job_dir)
-        .await
-        .map_err(|err| internal_error(err.into()))?;
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| internal_error(err.into()))?
-    {
-        let name = field.name().map(|n| n.to_string());
+    let file_config = FileFieldConfig::new(
+        "files",
+        &["pdf", "docx", "txt"],
+        100,
+        FileNaming::Indexed {
+            prefix: "source_",
+            pad_width: 3,
+        },
+    )
+    .with_min_files(1);
 
-        match name.as_deref() {
-            Some("document_type") => {
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                document_type = DocumentKind::from_str(value.trim());
-            }
-            Some("translate") => {
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                translate = matches!(value.trim(), "on" | "true" | "1" | "yes");
-            }
-            Some("files") => {
-                let Some(filename) = field.file_name().map(|s| s.to_string()) else {
-                    continue;
-                };
-                let safe_name = sanitize(&filename);
-                let ext = Path::new(&safe_name)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if !matches!(ext.as_str(), "pdf" | "docx" | "txt") {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(ApiError::new("仅支持上传 PDF、DOCX 和 TXT 文件。")),
-                    ));
-                }
-                let stored_path = job_dir.join(format!("source_{file_index}_{safe_name}"));
-                file_index += 1;
-
-                let mut file = tokio_fs::File::create(&stored_path)
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                file.write_all(&bytes)
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                file.flush()
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-
-                files.push(UploadedFile {
-                    stored_path,
-                    original_name: filename,
-                });
-            }
-            _ => {}
+    let upload = match process_upload_form(multipart, &job_dir, &[file_config]).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let _ = tokio_fs::remove_dir_all(&job_dir).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new(err.message().to_string())),
+            ));
         }
+    };
+
+    if let Some(value) = upload.first_text("document_type") {
+        document_type = DocumentKind::from_str(value.trim());
     }
 
-    if files.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError::new("请至少上传一个文件。")),
-        ));
+    if let Some(value) = upload.first_text("translate") {
+        translate = matches!(value.trim(), "on" | "true" | "1" | "yes");
     }
 
-    if files.len() > 100 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError::new("每个任务最多上传 100 个文件。")),
-        ));
-    }
+    let files: Vec<_> = upload.files_for("files").cloned().collect();
 
     let pool = state.pool();
 
@@ -1594,12 +1446,6 @@ impl DocumentKind {
             DocumentKind::OtherDocument => "other",
         }
     }
-}
-
-#[derive(Debug)]
-struct UploadedFile {
-    stored_path: PathBuf,
-    original_name: String,
 }
 
 #[derive(Serialize)]

@@ -12,7 +12,6 @@ use axum::{
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
-use sanitize_filename::sanitize;
 use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
@@ -22,6 +21,10 @@ use uuid::Uuid;
 
 mod admin;
 
+use crate::web::{
+    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
+    process_upload_form, render_upload_widget,
+};
 use crate::{
     AppState, SESSION_COOKIE, escape_html,
     llm::{AttachmentKind, ChatMessage, FileAttachment, LlmClient, LlmRequest, MessageRole},
@@ -132,6 +135,18 @@ async fn reviewer_page(
     } else {
         String::new()
     };
+    let upload_styles = UPLOAD_WIDGET_STYLES;
+    let upload_widget = render_upload_widget(
+        &UploadWidgetConfig::new(
+            "reviewer-upload",
+            "reviewer-file",
+            "file",
+            "上传稿件（PDF 或 DOCX）",
+        )
+        .with_description("系统会自动完成三轮审稿流程。")
+        .with_accept(".pdf,.docx"),
+    );
+    let upload_script = UPLOAD_WIDGET_SCRIPT;
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -154,35 +169,34 @@ async fn reviewer_page(
         section {{ margin-bottom: 2.5rem; }}
         .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
         .panel h2 {{ margin-top: 0; }}
-        .note {{ color: #475569; font-size: 0.95rem; }}
-        label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
-        input[type="file"], select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
-        input[type="file"]:focus, select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
+        label {{ display: block; margin: 0.5rem 0 0.35rem; font-weight: 600; color: #0f172a; }}
+        select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
+        select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
         button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
         button:hover {{ background: #1d4ed8; }}
         button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
-        .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
-        .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
-        .drop-zone strong {{ color: #1d4ed8; }}
-        .drop-zone input[type="file"] {{ display: none; }}
-        .browse-link {{ color: #2563eb; text-decoration: underline; cursor: pointer; }}
-        .status-alert {{ margin-top: 1rem; font-size: 0.95rem; }}
-        .status-alert.success {{ color: #166534; }}
-        .status-alert.error {{ color: #b91c1c; }}
-        .status-card {{ margin-top: 1rem; padding: 1.25rem; border-radius: 12px; border: 1px solid #e2e8f0; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; line-height: 1.7; }}
-        .status-card.processing {{ border-color: #fbbf24; background: #fffbeb; }}
-        .status-card.completed {{ border-color: #bbf7d0; background: #ecfdf3; }}
-        .status-card.failed {{ border-color: #fecaca; background: #fef2f2; }}
-        .downloads {{ display: grid; gap: 0.5rem; margin-top: 0.75rem; }}
-        .download-link {{ display: inline-flex; align-items: center; gap: 0.35rem; color: #2563eb; background: #e0f2fe; border: 1px solid #bfdbfe; padding: 0.45rem 0.9rem; border-radius: 999px; text-decoration: none; font-weight: 600; width: fit-content; }}
-        .download-link:hover {{ background: #bfdbfe; border-color: #93c5fd; }}
-        ul.process {{ padding-left: 1.25rem; margin: 0.5rem 0 0; color: #475569; }}
+        .note {{ color: #475569; font-size: 0.95rem; }}
+        .status-box {{ margin-top: 1.5rem; font-size: 0.95rem; color: #2563eb; }}
+        .status-box.error {{ color: #b91c1c; }}
+        .status-box.success {{ color: #166534; }}
+        .reviews {{ display: grid; gap: 1rem; margin-top: 1.5rem; }}
+        .review-card {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.25rem; box-shadow: 0 12px 30px rgba(15,23,42,0.06); }}
+        .review-card h3 {{ margin-top: 0; font-size: 1rem; }}
+        .status-tag {{ display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }}
+        .status-tag.pending {{ background: #fef3c7; color: #92400e; }}
+        .status-tag.processing {{ background: #e0f2fe; color: #1d4ed8; }}
+        .status-tag.completed {{ background: #dcfce7; color: #166534; }}
+        .status-tag.failed {{ background: #fee2e2; color: #b91c1c; }}
+        .downloads a {{ color: #2563eb; text-decoration: none; font-weight: 600; }}
+        .downloads a:hover {{ text-decoration: underline; }}
+        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
         @media (max-width: 768px) {{
             header {{ padding: 1.5rem 1rem; }}
             main {{ padding: 1.5rem 1rem; }}
             .header-bar {{ flex-direction: column; align-items: flex-start; }}
+            .reviews {{ grid-template-columns: 1fr; }}
         }}
-        .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        {upload_styles}
     </style>
 </head>
 <body>
@@ -194,289 +208,230 @@ async fn reviewer_page(
                 {admin_link}
             </div>
         </div>
-        <p class="note">当前登录：<strong>{username}</strong>。上传 PDF 或 DOCX 手稿，系统将执行三轮专家审稿流程。</p>
+        <p class="note">当前登录：<strong>{username}</strong>。上传稿件后，系统将自动执行三轮审稿，生成可下载的 DOCX 报告。</p>
     </header>
     <main>
         <section class="panel">
-            <h2>提交新任务</h2>
-            <p class="note">完整工作流程包含 8 个并行初审、1 次元审稿与 1 次事实核查。所有产出均可下载为 DOCX 文件。</p>
-            <ul class="process">
-                <li>第一轮：8 个模型并行独立审稿（每个最多重试 3 次，至少 4 个成功）</li>
-                <li>第二轮：综合所有第一轮结果生成元审稿</li>
-                <li>第三轮：针对原稿的事实核查与修订建议</li>
-            </ul>
-            <form id="reviewer-form" enctype="multipart/form-data">
-                <label for="file">上传稿件（PDF 或 DOCX）</label>
-                <div id="drop-area" class="drop-zone">
-                    <p><strong>拖拽文件</strong>到此处，或<span class="browse-link">点击选择</span>文件。</p>
-                    <p class="note">一次仅支持上传 1 个文件，以便执行完整审稿流程。</p>
-                    <input type="file" id="file" name="file" accept=".pdf,.docx" required>
-                </div>
-                <div id="selection-status" class="note"></div>
+            <h2>提交稿件</h2>
+            <form id="reviewer-form">
+                {upload_widget}
                 <label for="language">审稿语言</label>
-                <select id="language" name="language" required>
-                    <option value="english">English</option>
+                <select id="language" name="language">
+                    <option value="english">英文</option>
                     <option value="chinese">中文</option>
                 </select>
-                <button type="submit" id="submit-btn">开始审稿</button>
+                <button type="submit">开始审稿</button>
             </form>
-            <div id="submission-status" class="status-alert"></div>
+            <div id="submission-status" class="status-box">等待上传。</div>
         </section>
         <section class="panel">
             <h2>任务进度</h2>
-            <div id="job-status" class="status-card">
-                <p class="note">提交任务后，这里将显示实时进度和下载链接。</p>
-            </div>
+            <div id="job-status"></div>
         </section>
         {footer}
     </main>
+    {upload_script}
     <script>
         const form = document.getElementById('reviewer-form');
         const statusBox = document.getElementById('submission-status');
         const jobStatus = document.getElementById('job-status');
-        const submitBtn = document.getElementById('submit-btn');
-        const dropArea = document.getElementById('drop-area');
-        const fileInput = document.getElementById('file');
-        const selectionStatus = document.getElementById('selection-status');
+        const fileInput = document.getElementById('reviewer-file');
+        const languageSelect = document.getElementById('language');
         let pollTimer = null;
 
-        const statusLabels = {{
-            pending: '排队中',
-            processing: '处理中',
-            completed: '已完成',
-            failed: '失败'
-        }};
-
-        const updateSelectionStatus = () => {{
-            if (fileInput.files.length > 0) {{
-                selectionStatus.textContent = `已选择 ${{fileInput.files[0].name}}`;
-            }} else {{
-                selectionStatus.textContent = '';
+        const setStatus = (message, type = null) => {{
+            statusBox.textContent = message;
+            statusBox.classList.remove('error', 'success');
+            if (type) {{
+                statusBox.classList.add(type);
             }}
         }};
 
-        const handleFiles = (list) => {{
-            if (!list || list.length === 0) {{
+        const stopPolling = () => {{
+            if (pollTimer) {{
+                clearInterval(pollTimer);
+                pollTimer = null;
+            }}
+        }};
+
+        const renderReviewCard = (title, review) => {{
+            const status = review.available ? 'completed' : 'processing';
+            const tag = `<span class="status-tag ${{status}}">${{status}}</span>`;
+            const download = review.download_url
+                ? `<p class="downloads"><a href="${{review.download_url}}">下载 DOCX</a></p>`
+                : '';
+            return `
+                <div class="review-card">
+                    <h3>${{title}} ${{tag}}</h3>
+                    <p class="note">模型：${{review.model}}</p>
+                    ${{download}}
+                </div>
+            `;
+        }};
+
+        const renderJobStatus = (payload) => {{
+            if (!payload) {{
+                jobStatus.innerHTML = '<p class="note">暂无任务记录。</p>';
                 return;
             }}
-            const dt = new DataTransfer();
-            dt.items.add(list[0]);
-            fileInput.files = dt.files;
-            updateSelectionStatus();
+
+            const reviews = [];
+            if (payload.round1_reviews && payload.round1_reviews.length) {{
+                payload.round1_reviews.forEach((review, idx) => {{
+                    reviews.push(renderReviewCard(`第一轮评审 ${{idx + 1}}`, review));
+                }});
+            }}
+            if (payload.round2_review) {{
+                reviews.push(renderReviewCard('第二轮元审稿', payload.round2_review));
+            }}
+            if (payload.round3_review) {{
+                reviews.push(renderReviewCard('第三轮事实核查', payload.round3_review));
+            }}
+
+            const cards = reviews.length ? reviews.join('') : '<p class="note">评审结果准备中...</p>';
+            const detail = payload.status_detail ? `<p class="note">${{payload.status_detail}}</p>` : '';
+
+            jobStatus.innerHTML = `
+                <div class="status">
+                    <p><strong>任务状态：</strong> ${{payload.status}}</p>
+                    ${{detail}}
+                    <div class="reviews">${{cards}}</div>
+                </div>
+            `;
         }};
 
-        fileInput.addEventListener('change', updateSelectionStatus);
-        dropArea.addEventListener('click', () => fileInput.click());
-        dropArea.addEventListener('dragenter', (event) => {{
-            event.preventDefault();
-            dropArea.classList.add('dragover');
-        }});
-        dropArea.addEventListener('dragover', (event) => event.preventDefault());
-        dropArea.addEventListener('dragleave', (event) => {{
-            event.preventDefault();
-            const related = event.relatedTarget;
-            if (!related || !dropArea.contains(related)) {{
-                dropArea.classList.remove('dragover');
-            }}
-        }});
-        dropArea.addEventListener('drop', (event) => {{
-            event.preventDefault();
-            dropArea.classList.remove('dragover');
-            handleFiles(event.dataTransfer.files);
-        }});
+        const fetchStatus = async (jobId) => {{
+            try {{
+                const response = await fetch(`/api/reviewer/jobs/${{jobId}}`, {{ headers: {{ 'Accept': 'application/json' }} }});
+                if (!response.ok) {{
+                    throw new Error('状态查询失败');
+                }}
+                const payload = await response.json();
+                renderJobStatus(payload);
 
-        updateSelectionStatus();
+                if (payload.status === '{STATUS_COMPLETED}' || payload.status === '{STATUS_FAILED}') {{
+                    stopPolling();
+                    if (payload.status === '{STATUS_COMPLETED}') {{
+                        setStatus('审稿完成，可查看下方下载链接。', 'success');
+                    }} else {{
+                        setStatus('任务失败，请查看状态信息。', 'error');
+                    }}
+                }}
+            }} catch (error) {{
+                stopPolling();
+                setStatus('轮询失败：' + error.message, 'error');
+            }}
+        }};
 
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
-
-            if (!fileInput.files.length) {{
-                statusBox.textContent = '请先选择待审稿的文件。';
-                statusBox.className = 'status-alert error';
+            if (!fileInput || fileInput.files.length === 0) {{
+                setStatus('请先选择稿件文件。', 'error');
                 return;
             }}
 
+            stopPolling();
+            setStatus('正在上传稿件...', null);
+
             const formData = new FormData(form);
-            submitBtn.disabled = true;
-            statusBox.textContent = '正在提交任务...';
-            statusBox.className = 'status-alert';
 
             try {{
                 const response = await fetch('/tools/reviewer/jobs', {{
                     method: 'POST',
-                    body: formData
+                    body: formData,
                 }});
 
                 if (!response.ok) {{
-                    const errorText = await response.text();
-                    throw new Error(errorText || '上传失败');
+                    const payload = await response.json().catch(() => ({{ message: '提交失败。' }}));
+                    setStatus(payload.message || '提交失败。', 'error');
+                    return;
                 }}
 
-                const data = await response.json();
-                statusBox.textContent = '任务已提交，正在排队处理。';
-                statusBox.className = 'status-alert success';
-                setProcessingState();
-                pollJobStatus(data.job_id);
-            }} catch (err) {{
-                statusBox.textContent = `错误：${{err.message}}`;
-                statusBox.className = 'status-alert error';
-                submitBtn.disabled = false;
+                const payload = await response.json();
+                setStatus('任务已创建，正在执行审稿流程...', 'success');
+                renderJobStatus(null);
+                fetchStatus(payload.job_id);
+                pollTimer = setInterval(() => fetchStatus(payload.job_id), 5000);
+                form.reset();
+                if (fileInput) {{
+                    fileInput.value = '';
+                    fileInput.dispatchEvent(new Event('change'));
+                }}
+            }} catch (error) {{
+                setStatus('提交失败：' + error.message, 'error');
             }}
         }});
-
-        function setProcessingState() {{
-            jobStatus.className = 'status-card processing';
-            jobStatus.innerHTML = '<p><strong>状态：</strong>任务已启动，正在等待各轮结果。</p>';
-        }}
-
-        function pollJobStatus(jobId) {{
-            if (pollTimer) {{
-                clearInterval(pollTimer);
-            }}
-
-            const fetchStatus = async () => {{
-                try {{
-                    const response = await fetch(`/api/reviewer/jobs/${{jobId}}`);
-                    if (!response.ok) {{
-                        throw new Error('无法获取任务状态');
-                    }}
-                    const data = await response.json();
-                    renderJobStatus(data);
-
-                    if (data.status === 'completed') {{
-                        statusBox.textContent = '审稿已完成，可下载各轮报告。';
-                        statusBox.className = 'status-alert success';
-                        submitBtn.disabled = false;
-                        clearInterval(pollTimer);
-                    }} else if (data.status === 'failed') {{
-                        statusBox.textContent = data.error ? `任务失败：${{data.error}}` : '任务失败，请稍后重试。';
-                        statusBox.className = 'status-alert error';
-                        submitBtn.disabled = false;
-                        clearInterval(pollTimer);
-                    }}
-                }} catch (error) {{
-                    console.error('Polling error:', error);
-                }}
-            }};
-
-            fetchStatus();
-            pollTimer = setInterval(fetchStatus, 2000);
-        }}
-
-        function renderJobStatus(data) {{
-            const statusClass = getStatusClass(data.status);
-            jobStatus.className = `status-card ${{statusClass}}`;
-
-            let html = `<p><strong>状态：</strong>${{statusLabels[data.status] || data.status}}</p>`;
-            if (data.status_detail) {{
-                html += `<p class="note">${{data.status_detail}}</p>`;
-            }}
-
-            if (Array.isArray(data.round1_reviews)) {{
-                const available = data.round1_reviews.filter(r => r.available && r.download_url);
-                html += '<h3>第一轮审稿</h3>';
-                if (available.length) {{
-                    html += '<div class="downloads">';
-                    available.forEach((review, index) => {{
-                        html += `<a class="download-link" href="${{review.download_url}}">评审 ${{index + 1}}（${{review.model}}）</a>`;
-                    }});
-                    html += '</div>';
-                }} else {{
-                    html += '<p class="note">首轮评审正在生成中……</p>';
-                }}
-            }}
-
-            if (data.round2_review && data.round2_review.available && data.round2_review.download_url) {{
-                html += '<h3>第二轮元审稿</h3>';
-                html += `<div class="downloads"><a class="download-link" href="${{data.round2_review.download_url}}">下载元审稿报告</a></div>`;
-            }}
-
-            if (data.round3_review && data.round3_review.available && data.round3_review.download_url) {{
-                html += '<h3>第三轮事实核查</h3>';
-                html += `<div class="downloads"><a class="download-link" href="${{data.round3_review.download_url}}">下载最终报告</a></div>`;
-            }}
-
-            if (data.error && data.status !== 'completed') {{
-                html += `<p class="note" style="color:#b91c1c;">错误信息：${{data.error}}</p>`;
-            }}
-
-            jobStatus.innerHTML = html;
-        }}
-
-        function getStatusClass(status) {{
-            if (status === 'completed') return 'completed';
-            if (status === 'failed') return 'failed';
-            return 'processing';
-        }}
     </script>
 </body>
 </html>"#,
+        upload_styles = upload_styles,
+        upload_widget = upload_widget,
+        upload_script = upload_script,
         admin_link = admin_link,
         username = username,
-        footer = footer
+        footer = footer,
     );
 
     Ok(Html(html))
 }
+
 async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, Response> {
     let user = require_user(&state, &jar).await?;
 
-    // Check usage limits
     if let Err(e) = usage::ensure_within_limits(state.pool_ref(), user.id, MODULE_REVIEWER, 1).await
     {
         return Err((StatusCode::TOO_MANY_REQUESTS, e.message()).into_response());
     }
 
-    let mut filename = String::new();
-    let mut language = String::from("english");
-    let mut file_data: Option<Vec<u8>> = None;
+    let temp_dir = PathBuf::from(STORAGE_ROOT).join(format!("tmp_{}", Uuid::new_v4()));
+    let file_config = FileFieldConfig::new(
+        "file",
+        &["pdf", "docx"],
+        1,
+        FileNaming::PrefixOnly {
+            prefix: "manuscript_",
+        },
+    )
+    .with_min_files(1);
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Multipart error: {e}")).into_response())?
-    {
-        let name = field.name().unwrap_or("").to_string();
-        match name.as_str() {
-            "file" => {
-                filename = field.file_name().unwrap_or("manuscript.pdf").to_string();
-                file_data = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|e| {
-                            (StatusCode::BAD_REQUEST, format!("Failed to read file: {e}"))
-                                .into_response()
-                        })?
-                        .to_vec(),
-                );
-            }
-            "language" => {
-                language = field.text().await.map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("Failed to read language: {e}"),
-                    )
-                        .into_response()
-                })?;
-            }
-            _ => {}
+    let upload = match process_upload_form(multipart, &temp_dir, &[file_config]).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+            return Err((StatusCode::BAD_REQUEST, err.message().to_string()).into_response());
         }
-    }
+    };
 
-    let file_bytes =
-        file_data.ok_or_else(|| (StatusCode::BAD_REQUEST, "No file provided").into_response())?;
+    let language = upload
+        .first_text("language")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "english".to_string());
 
-    if !language.eq("english") && !language.eq("chinese") {
+    if language != "english" && language != "chinese" {
+        let _ = tokio_fs::remove_dir_all(&temp_dir).await;
         return Err((StatusCode::BAD_REQUEST, "Invalid language").into_response());
     }
 
-    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    let file = match upload.first_file_for("file").cloned() {
+        Some(file) => file,
+        None => {
+            let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+            return Err((StatusCode::BAD_REQUEST, "No file provided").into_response());
+        }
+    };
+
+    let ext = file
+        .original_name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
     if ext != "pdf" && ext != "docx" {
+        let _ = tokio_fs::remove_dir_all(&temp_dir).await;
         return Err((
             StatusCode::BAD_REQUEST,
             "Only PDF and DOCX files are accepted",
@@ -484,43 +439,44 @@ async fn create_job(
             .into_response());
     }
 
-    // Create job in database
-    let job_id: i32 = sqlx::query_scalar(
+    let job_id: i32 = match sqlx::query_scalar(
         "INSERT INTO reviewer_jobs (user_id, filename, language, status)
          VALUES ($1, $2, $3, $4) RETURNING job_id",
     )
     .bind(user.id)
-    .bind(&filename)
+    .bind(&file.original_name)
     .bind(&language)
     .bind(STATUS_PENDING)
     .fetch_one(state.pool_ref())
     .await
-    .map_err(|e| {
-        error!("Failed to create job: {e}");
-        (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create job").into_response()
-    })?;
+    {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+            error!("Failed to create job: {e}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to create job").into_response());
+        }
+    };
 
-    // Save uploaded file
-    let job_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
-    tokio_fs::create_dir_all(&job_dir).await.map_err(|e| {
+    let final_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
+    if let Err(e) = tokio_fs::create_dir_all(&final_dir).await {
+        let _ = tokio_fs::remove_dir_all(&temp_dir).await;
         error!("Failed to create job directory: {e}");
-        (
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to create job directory",
         )
-            .into_response()
-    })?;
+            .into_response());
+    }
 
-    let sanitized_filename = sanitize(&filename);
-    let manuscript_path = job_dir.join(&sanitized_filename);
-    tokio_fs::write(&manuscript_path, &file_bytes)
-        .await
-        .map_err(|e| {
-            error!("Failed to write manuscript file: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file").into_response()
-        })?;
+    let manuscript_path = final_dir.join(&file.stored_name);
+    if let Err(e) = tokio_fs::rename(&file.stored_path, &manuscript_path).await {
+        let _ = tokio_fs::remove_dir_all(&temp_dir).await;
+        error!("Failed to persist manuscript: {e}");
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file").into_response());
+    }
+    let _ = tokio_fs::remove_dir_all(&temp_dir).await;
 
-    // Spawn background processing
     let pool = state.pool().clone();
     let llm_client = state.llm_client().clone();
     let reviewer_settings = state.reviewer_settings().await.ok_or_else(|| {
@@ -531,15 +487,17 @@ async fn create_job(
             .into_response()
     })?;
 
+    let language_clone = language.clone();
+    let ext_clone = ext.clone();
     tokio::spawn(async move {
         if let Err(e) = process_reviewer_job(
             pool.clone(),
             llm_client,
             job_id,
             user.id,
-            manuscript_path,
-            &language,
-            &ext,
+            manuscript_path.clone(),
+            &language_clone,
+            &ext_clone,
             reviewer_settings,
         )
         .await

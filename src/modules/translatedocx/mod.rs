@@ -18,13 +18,17 @@ use docx_rs::{BreakType, Docx, Paragraph, Run};
 use quick_xml::{Reader as XmlReader, events::Event};
 use sanitize_filename::sanitize;
 use serde::Serialize;
-use tokio::{fs as tokio_fs, io::AsyncWriteExt};
+use tokio::fs as tokio_fs;
 use tracing::error;
 use uuid::Uuid;
 use zip::ZipArchive;
 
 mod admin;
 
+use crate::web::{
+    FileFieldConfig, FileNaming, UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig,
+    process_upload_form, render_upload_widget,
+};
 use crate::{
     AppState, GlossaryTermRow,
     config::DocxTranslatorPrompts,
@@ -112,6 +116,14 @@ async fn translatedocx_page(
     } else {
         ""
     };
+    let upload_styles = UPLOAD_WIDGET_STYLES;
+    let upload_widget = render_upload_widget(
+        &UploadWidgetConfig::new("translator-upload", "files", "files", "上传 DOCX 文件")
+            .with_description("支持上传单个 DOCX 文档。")
+            .with_note("本工具一次仅支持处理 1 个文件。")
+            .with_accept(".docx"),
+    );
+    let upload_script = UPLOAD_WIDGET_SCRIPT;
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -131,6 +143,8 @@ async fn translatedocx_page(
         section {{ margin-bottom: 2.5rem; }}
         .panel {{ background: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; padding: 1.5rem; box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08); }}
         label {{ display: block; margin-bottom: 0.5rem; font-weight: 600; color: #0f172a; }}
+        select {{ width: 100%; padding: 0.75rem; border-radius: 8px; border: 1px solid #cbd5f5; background: #f8fafc; color: #0f172a; box-sizing: border-box; }}
+        select:focus {{ outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }}
         button {{ padding: 0.85rem 1.2rem; border: none; border-radius: 8px; background: #2563eb; color: #ffffff; font-weight: 600; cursor: pointer; transition: background 0.15s ease; }}
         button:hover {{ background: #1d4ed8; }}
         button:disabled {{ opacity: 0.6; cursor: not-allowed; }}
@@ -144,12 +158,8 @@ async fn translatedocx_page(
         .note {{ color: #475569; font-size: 0.95rem; }}
         .downloads a {{ color: #2563eb; text-decoration: none; margin-right: 1rem; }}
         .downloads a:hover {{ text-decoration: underline; }}
-        .drop-zone {{ border: 2px dashed #cbd5f5; border-radius: 12px; padding: 2rem; text-align: center; background: #f8fafc; transition: border-color 0.2s ease, background 0.2s ease; cursor: pointer; margin-bottom: 1rem; color: #475569; }}
-        .drop-zone.dragover {{ border-color: #2563eb; background: #e0f2fe; }}
-        .drop-zone strong {{ color: #1d4ed8; }}
-        .drop-zone input[type="file"] {{ display: none; }}
-        .browse-link {{ color: #2563eb; text-decoration: underline; }}
         .app-footer {{ margin-top: 3rem; text-align: center; font-size: 0.85rem; color: #94a3b8; }}
+        {upload_styles}
     </style>
 </head>
 <body>
@@ -167,12 +177,7 @@ async fn translatedocx_page(
         <section class="panel">
             <h2>提交新任务</h2>
             <form id="translator-form">
-                <label for="files">上传 DOCX 文件</label>
-                <div id="drop-area" class="drop-zone">
-                    <p><strong>拖拽 DOCX 文件</strong>到此处，或<span class="browse-link">点击选择</span>文件。</p>
-                    <p class="note">本工具一次仅支持处理 1 个文件。</p>
-                    <input id="files" name="files" type="file" accept=".docx" required>
-                </div>
+                {upload_widget}
                 <label for="direction">翻译方向</label>
                 <select id="direction" name="direction">
                     <option value="en_to_cn">英文 → 中文</option>
@@ -188,62 +193,30 @@ async fn translatedocx_page(
         </section>
         {footer}
     </main>
+    {upload_script}
     <script>
         const form = document.getElementById('translator-form');
         const statusBox = document.getElementById('submission-status');
         const jobStatus = document.getElementById('job-status');
-        const dropArea = document.getElementById('drop-area');
         const fileInput = document.getElementById('files');
+        const directionSelect = document.getElementById('direction');
         let activeJobId = null;
         let statusTimer = null;
 
-        const updateSelectionStatus = () => {{
-            if (fileInput.files.length > 0) {{
-                statusBox.textContent = `已选择 ${{fileInput.files.length}} 个文件。`;
-            }} else {{
-                statusBox.textContent = '';
-            }}
-        }};
-
-        const handleFiles = (list) => {{
-            if (!list || !list.length) {{
-                return;
-            }}
-
-            const dt = new DataTransfer();
-            dt.items.add(list[0]);
-            fileInput.files = dt.files;
-            updateSelectionStatus();
-        }};
-
-        fileInput.addEventListener('change', updateSelectionStatus);
-        dropArea.addEventListener('click', () => fileInput.click());
-        dropArea.addEventListener('dragenter', (event) => {{
-            event.preventDefault();
-            dropArea.classList.add('dragover');
-        }});
-        dropArea.addEventListener('dragover', (event) => event.preventDefault());
-        dropArea.addEventListener('dragleave', (event) => {{
-            event.preventDefault();
-            const related = event.relatedTarget;
-            if (!related || !dropArea.contains(related)) {{
-                dropArea.classList.remove('dragover');
-            }}
-        }});
-        dropArea.addEventListener('drop', (event) => {{
-            event.preventDefault();
-            dropArea.classList.remove('dragover');
-            handleFiles(event.dataTransfer.files);
-        }});
-
         form.addEventListener('submit', async (event) => {{
             event.preventDefault();
-            if (!fileInput.files.length) {{
+
+            if (!fileInput || fileInput.files.length === 0) {{
                 statusBox.textContent = '请先选择 DOCX 文件。';
                 return;
             }}
 
-            const directionValue = document.getElementById('direction').value;
+            if (fileInput.files.length > 1) {{
+                statusBox.textContent = '一次仅支持上传 1 个文件。';
+                return;
+            }}
+
+            const directionValue = directionSelect.value;
             const directionLabel = directionValue === 'cn_to_en' ? '中文 → 英文' : '英文 → 中文';
             statusBox.textContent = `正在上传文档（${{directionLabel}}）...`;
             const data = new FormData(form);
@@ -255,7 +228,7 @@ async fn translatedocx_page(
                 }});
 
                 if (!response.ok) {{
-                    const payload = await response.json();
+                    const payload = await response.json().catch(() => ({{ message: '任务创建失败。' }}));
                     statusBox.textContent = payload.message || '任务创建失败。';
                     return;
                 }}
@@ -263,8 +236,14 @@ async fn translatedocx_page(
                 const payload = await response.json();
                 activeJobId = payload.job_id;
                 statusBox.textContent = '任务已创建，正在监控进度...';
+                form.reset();
+                if (fileInput) {{
+                    fileInput.value = '';
+                    fileInput.dispatchEvent(new Event('change'));
+                }}
                 pollStatus(payload.status_url);
             }} catch (error) {{
+                console.error(error);
                 statusBox.textContent = '提交任务失败。';
             }}
         }});
@@ -353,6 +332,9 @@ async fn translatedocx_page(
     </script>
 </body>
 </html>"#,
+        upload_styles = upload_styles,
+        upload_widget = upload_widget,
+        upload_script = upload_script,
         username = escape_html(&user.username),
         completed = STATUS_COMPLETED,
         failed = STATUS_FAILED,
@@ -366,7 +348,7 @@ async fn translatedocx_page(
 async fn create_job(
     State(state): State<AppState>,
     jar: CookieJar,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Result<Json<JobSubmissionResponse>, (StatusCode, Json<ApiError>)> {
     let user = require_user(&state, &jar)
         .await
@@ -378,95 +360,45 @@ async fn create_job(
 
     let job_id = Uuid::new_v4();
     let job_dir = PathBuf::from(STORAGE_ROOT).join(job_id.to_string());
-    tokio_fs::create_dir_all(&job_dir)
-        .await
-        .map_err(|err| internal_error(err.into()))?;
 
-    let mut uploaded_file: Option<UploadedFile> = None;
-    let mut direction = TranslationDirection::EnToCn;
+    let file_config = FileFieldConfig::new(
+        "files",
+        &["docx"],
+        1,
+        FileNaming::PrefixOnly { prefix: "source_" },
+    )
+    .with_min_files(1);
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| internal_error(err.into()))?
-    {
-        let Some(name) = field.name() else {
-            continue;
-        };
-
-        match name {
-            "files" => {
-                let Some(filename) = field.file_name().map(|s| s.to_string()) else {
-                    continue;
-                };
-                if uploaded_file.is_some() {
-                    let _ = tokio_fs::remove_dir_all(&job_dir).await;
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(ApiError::new("每个任务仅支持上传一个 DOCX 文件。")),
-                    ));
-                }
-                let safe_name = sanitize(&filename);
-                let ext = Path::new(&safe_name)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if ext != "docx" {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(ApiError::new("仅支持上传 DOCX 文件。")),
-                    ));
-                }
-
-                let stored_path = job_dir.join(format!("source_{}", safe_name));
-
-                let mut file = tokio_fs::File::create(&stored_path)
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                let bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                file.write_all(&bytes)
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                file.flush()
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-
-                uploaded_file = Some(UploadedFile {
-                    stored_path,
-                    original_name: filename,
-                });
-            }
-            "direction" => {
-                let value = field
-                    .text()
-                    .await
-                    .map_err(|err| internal_error(err.into()))?;
-                direction = TranslationDirection::from_form_value(value.trim());
-            }
-            _ => {}
+    let upload = match process_upload_form(multipart, &job_dir, &[file_config]).await {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let _ = tokio_fs::remove_dir_all(&job_dir).await;
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::new(err.message().to_string())),
+            ));
         }
-    }
-
-    let Some(file) = uploaded_file else {
-        let _ = tokio_fs::remove_dir_all(&job_dir).await;
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ApiError::new("请上传一个 DOCX 文件。")),
-        ));
     };
 
-    let pool = state.pool();
+    let mut direction = TranslationDirection::EnToCn;
+    if let Some(value) = upload.first_text("direction") {
+        direction = TranslationDirection::from_form_value(value.trim());
+    }
 
-    if let Err(err) = usage::ensure_within_limits(&pool, user.id, MODULE_TRANSLATE_DOCX, 1).await {
+    let files: Vec<_> = upload.files_for("files").cloned().collect();
+    let file = files
+        .first()
+        .expect("at least one file guaranteed by process_upload_form");
+
+    if let Err(err) =
+        usage::ensure_within_limits(&state.pool(), user.id, MODULE_TRANSLATE_DOCX, 1).await
+    {
         let _ = tokio_fs::remove_dir_all(&job_dir).await;
         return Err((StatusCode::FORBIDDEN, Json(ApiError::new(err.message()))));
     }
 
-    let mut transaction = pool
+    let mut transaction = state
+        .pool()
         .begin()
         .await
         .map_err(|err| internal_error(err.into()))?;
@@ -1354,13 +1286,7 @@ async fn ensure_storage_root() -> Result<()> {
         .with_context(|| format!("failed to ensure storage root at {}", STORAGE_ROOT))
 }
 
-#[derive(Debug)]
-struct UploadedFile {
-    stored_path: PathBuf,
-    original_name: String,
-}
-
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct JobSubmissionResponse {
     job_id: Uuid,
     status_url: String,
