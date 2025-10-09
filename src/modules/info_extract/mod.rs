@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Json, Router,
     extract::{Multipart, Path as AxumPath, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::StatusCode,
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
 };
@@ -29,6 +29,7 @@ use uuid::Uuid;
 mod admin;
 
 use crate::web::history_ui;
+use crate::web::storage::JobAccess;
 use crate::web::{
     FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
     UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
@@ -42,9 +43,9 @@ use crate::{
     render_footer,
     usage::{self, MODULE_INFO_EXTRACT},
     web::{
-        ApiMessage, JobSubmission,
+        AccessMessages, ApiMessage, JobSubmission,
         auth::{self, JsonAuthError},
-        json_error,
+        ensure_storage_root, json_error, require_path, stream_file, verify_job_access,
     },
 };
 
@@ -131,6 +132,16 @@ struct DownloadRecord {
     user_id: Uuid,
     result_path: Option<String>,
     files_purged_at: Option<DateTime<Utc>>,
+}
+
+impl JobAccess for DownloadRecord {
+    fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    fn files_purged_at(&self) -> Option<DateTime<Utc>> {
+        self.files_purged_at
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -399,7 +410,7 @@ async fn create_job(
         .await
         .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
-    ensure_storage_root()
+    ensure_storage_root(STORAGE_ROOT)
         .await
         .map_err(|err| internal_error(err.into()))?;
 
@@ -619,59 +630,32 @@ async fn download_result(
         .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
-    let record = sqlx::query_as::<_, DownloadRecord>(
-        "SELECT user_id, result_path, files_purged_at FROM info_extract_jobs WHERE id = $1",
+    let record = verify_job_access(
+        || {
+            sqlx::query_as::<_, DownloadRecord>(
+                "SELECT user_id, result_path, files_purged_at FROM info_extract_jobs WHERE id = $1",
+            )
+            .bind(job_id)
+            .fetch_optional(&pool)
+        },
+        &user,
+        AccessMessages {
+            not_found: "未找到任务或暂无可下载结果。",
+            forbidden: "您无权下载该任务的结果。",
+            purged: "结果文件已过期并被清除。",
+        },
     )
-    .bind(job_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|err| internal_error(err.into()))?
-    .ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ApiMessage::new("未找到任务或暂无可下载结果。")),
-        )
-    })?;
+    .await?;
 
-    if record.user_id != user.id && !user.is_admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiMessage::new("您无权下载该任务的结果。")),
-        ));
-    }
-
-    if record.files_purged_at.is_some() {
-        return Err((
-            StatusCode::GONE,
-            Json(ApiMessage::new("结果文件已过期并被清除。")),
-        ));
-    }
-
-    let result_path = record.result_path.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ApiMessage::new("任务尚未生成结果。")),
-        )
-    })?;
-
-    let bytes = tokio_fs::read(&result_path)
-        .await
-        .map_err(|err| internal_error(err.into()))?;
-
+    let result_path = require_path(record.result_path.clone(), "任务尚未生成结果。")?;
     let filename = format!("info_extract_{}.xlsx", job_id);
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        ),
-    );
-    let disposition = format!("attachment; filename=\"{}\"", filename);
-    let disposition = HeaderValue::from_str(&disposition)
-        .map_err(|err| internal_error(anyhow!("invalid header value: {err}")))?;
-    headers.insert(header::CONTENT_DISPOSITION, disposition);
 
-    Ok((headers, bytes))
+    stream_file(
+        Path::new(&result_path),
+        &filename,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    .await
 }
 
 fn ensure_status_detail(truncated: bool) -> Option<String> {
@@ -872,15 +856,6 @@ fn read_pdf_text(path: &Path) -> Result<String> {
     extract_pdf_text(path)
         .with_context(|| format!("无法读取 PDF 文本：{}", path.display()))
         .map(|content| content.trim().to_string())
-}
-
-async fn ensure_storage_root() -> Result<()> {
-    if !Path::new(STORAGE_ROOT).exists() {
-        tokio_fs::create_dir_all(STORAGE_ROOT)
-            .await
-            .context("无法创建信息提取存储目录")?;
-    }
-    Ok(())
 }
 
 fn spawn_job_worker(state: AppState, job_id: Uuid, fields: Vec<ExtractionField>) {

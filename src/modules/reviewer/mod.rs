@@ -24,6 +24,7 @@ use uuid::Uuid;
 mod admin;
 
 use crate::web::history_ui;
+use crate::web::storage::JobAccess;
 use crate::web::{
     FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
     UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
@@ -36,8 +37,9 @@ use crate::{
     usage::{self, MODULE_REVIEWER},
     utils::docx_to_pdf::convert_docx_to_pdf,
     web::{
+        AccessMessages,
         auth::{self, JsonAuthError},
-        json_error,
+        ensure_storage_root, json_error, require_path, stream_file, verify_job_access,
     },
 };
 
@@ -80,6 +82,16 @@ struct JobRow {
     status: String,
     status_detail: Option<String>,
     files_purged_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl JobAccess for JobRow {
+    fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    fn files_purged_at(&self) -> Option<chrono::DateTime<Utc>> {
+        self.files_purged_at
+    }
 }
 
 #[derive(Serialize)]
@@ -332,6 +344,10 @@ async fn create_job(
         return Err(json_response(StatusCode::TOO_MANY_REQUESTS, e.message()));
     }
 
+    ensure_storage_root(STORAGE_ROOT)
+        .await
+        .map_err(|err| json_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+
     let temp_dir = PathBuf::from(STORAGE_ROOT).join(format!("tmp_{}", Uuid::new_v4()));
     let file_config = FileFieldConfig::new(
         "file",
@@ -487,26 +503,24 @@ async fn job_status(
             (status, Json(json!({ "message": message }))).into_response()
         })?;
 
-    let job = sqlx::query_as::<_, JobRow>(
-        "SELECT user_id, status, status_detail, files_purged_at
-         FROM reviewer_jobs WHERE job_id = $1",
+    let job = verify_job_access(
+        || {
+            sqlx::query_as::<_, JobRow>(
+                "SELECT user_id, status, status_detail, files_purged_at
+                 FROM reviewer_jobs WHERE job_id = $1",
+            )
+            .bind(job_id)
+            .fetch_optional(state.pool_ref())
+        },
+        &user,
+        AccessMessages {
+            not_found: "Job not found",
+            forbidden: "Access denied",
+            purged: "审稿文件已过期并被清除。",
+        },
     )
-    .bind(job_id)
-    .fetch_optional(state.pool_ref())
     .await
-    .map_err(|e| {
-        error!("Database error: {e}");
-        json_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-    })?
-    .ok_or_else(|| json_response(StatusCode::NOT_FOUND, "Job not found"))?;
-
-    if job.user_id != user.id && !user.is_admin {
-        return Err(json_response(StatusCode::FORBIDDEN, "Access denied"));
-    }
-
-    if job.files_purged_at.is_some() {
-        return Err(json_response(StatusCode::GONE, "审稿文件已过期并被清除。"));
-    }
+    .map_err(|err| err.into_response())?;
 
     // Fetch review documents
     #[derive(sqlx::FromRow)]
@@ -620,26 +634,24 @@ async fn download_review(
             (status, Json(json!({ "message": message }))).into_response()
         })?;
 
-    let job = sqlx::query_as::<_, JobRow>(
-        "SELECT user_id, status, status_detail, files_purged_at
-         FROM reviewer_jobs WHERE job_id = $1",
+    let _job = verify_job_access(
+        || {
+            sqlx::query_as::<_, JobRow>(
+                "SELECT user_id, status, status_detail, files_purged_at
+                 FROM reviewer_jobs WHERE job_id = $1",
+            )
+            .bind(job_id)
+            .fetch_optional(state.pool_ref())
+        },
+        &user,
+        AccessMessages {
+            not_found: "Job not found",
+            forbidden: "Access denied",
+            purged: "审稿文件已过期并被清除。",
+        },
     )
-    .bind(job_id)
-    .fetch_optional(state.pool_ref())
     .await
-    .map_err(|e| {
-        error!("Database error: {e}");
-        json_response(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
-    })?
-    .ok_or_else(|| json_response(StatusCode::NOT_FOUND, "Job not found"))?;
-
-    if job.user_id != user.id && !user.is_admin {
-        return Err(json_response(StatusCode::FORBIDDEN, "Access denied"));
-    }
-
-    if job.files_purged_at.is_some() {
-        return Err(json_response(StatusCode::GONE, "审稿文件已过期并被清除。"));
-    }
+    .map_err(|err| err.into_response())?;
 
     #[derive(sqlx::FromRow)]
     struct DocPath {
@@ -661,9 +673,8 @@ async fn download_review(
     })?
     .ok_or_else(|| json_response(StatusCode::NOT_FOUND, "Review not found"))?;
 
-    let file_path = doc
-        .file_path
-        .ok_or_else(|| json_response(StatusCode::NOT_FOUND, "File not available"))?;
+    let file_path = require_path(doc.file_path.clone(), "File not available")
+        .map_err(|err| err.into_response())?;
 
     let path_buf = PathBuf::from(&file_path);
     let filename = path_buf
@@ -671,25 +682,13 @@ async fn download_review(
         .and_then(|n| n.to_str())
         .unwrap_or("review.docx");
 
-    let bytes = tokio_fs::read(&file_path).await.map_err(|e| {
-        error!("Failed to read file {file_path}: {e}");
-        json_response(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file")
-    })?;
-
-    Ok((
-        [
-            (
-                "Content-Type",
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            ),
-            (
-                "Content-Disposition",
-                &format!("attachment; filename=\"{}\"", filename),
-            ),
-        ],
-        bytes,
+    stream_file(
+        Path::new(&file_path),
+        filename,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
-        .into_response())
+    .await
+    .map_err(|err| err.into_response())
 }
 
 // Background processing function

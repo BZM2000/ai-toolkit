@@ -9,6 +9,7 @@ pub mod models;
 pub mod responses;
 pub mod router;
 pub mod state;
+pub mod storage;
 pub mod templates;
 pub mod upload_ui;
 pub mod uploads;
@@ -21,6 +22,9 @@ pub use data::{
 pub use models::{GlossaryTermRow, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow};
 pub use responses::{ApiMessage, JobSubmission, json_error};
 pub use state::AppState;
+pub use storage::{
+    AccessMessages, ensure_storage_root, require_path, stream_file, verify_job_access,
+};
 pub use templates::{
     ToolAdminLink, ToolPageLayout, escape_html, render_footer, render_login_page, render_tool_page,
 };

@@ -9,8 +9,8 @@ use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
     extract::{Multipart, Path as AxumPath, State},
-    http::{StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    http::StatusCode,
+    response::{Html, Redirect, Response},
     routing::{get, post},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -27,6 +27,7 @@ use zip::ZipArchive;
 mod admin;
 
 use crate::web::history_ui;
+use crate::web::storage::JobAccess;
 use crate::web::{
     FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
     UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
@@ -40,9 +41,9 @@ use crate::{
     render_footer,
     usage::{self, MODULE_TRANSLATE_DOCX},
     web::{
-        ApiMessage, JobSubmission,
+        AccessMessages, ApiMessage, JobSubmission,
         auth::{self, JsonAuthError},
-        json_error,
+        ensure_storage_root, json_error, require_path, stream_file, verify_job_access,
     },
 };
 
@@ -343,7 +344,7 @@ async fn create_job(
 
     let pool = state.pool();
 
-    ensure_storage_root()
+    ensure_storage_root(STORAGE_ROOT)
         .await
         .map_err(|err| internal_error(err.into()))?;
 
@@ -521,37 +522,33 @@ async fn download_document_output(
         .map_err(|JsonAuthError { status, message }| json_error(status, message))?;
 
     let pool = state.pool();
-    let document = sqlx::query_as::<_, DocumentDownloadRecord>(
-        "SELECT j.user_id, j.files_purged_at, d.original_filename, d.translated_path FROM docx_documents d INNER JOIN docx_jobs j ON j.id = d.job_id WHERE d.id = $1 AND d.job_id = $2",
+    let document = verify_job_access(
+        || {
+            sqlx::query_as::<_, DocumentDownloadRecord>(
+                "SELECT j.user_id, j.files_purged_at, d.original_filename, d.translated_path FROM docx_documents d INNER JOIN docx_jobs j ON j.id = d.job_id WHERE d.id = $1 AND d.job_id = $2",
+            )
+            .bind(document_id)
+            .bind(job_id)
+            .fetch_optional(&pool)
+        },
+        &user,
+        AccessMessages {
+            not_found: "Document output not found.",
+            forbidden: "You do not have access to this output.",
+            purged: "译文下载已过期并被清除。",
+        },
     )
-    .bind(document_id)
-    .bind(job_id)
-    .fetch_optional(&pool)
+    .await?;
+
+    let path = require_path(document.translated_path.clone(), "译文文件尚未生成。")?;
+    let download_name = sanitize_for_docx(&document.original_filename);
+
+    stream_file(
+        Path::new(&path),
+        &download_name,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
     .await
-    .map_err(|err| internal_error(err.into()))?
-    .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "Document output not found."))?;
-
-    if document.user_id != user.id && !user.is_admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiMessage::new("You do not have access to this output.")),
-        ));
-    }
-
-    if document.files_purged_at.is_some() {
-        return Err((
-            StatusCode::GONE,
-            Json(ApiMessage::new("译文下载已过期并被清除。")),
-        ));
-    }
-
-    let path = document
-        .translated_path
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "译文文件尚未生成。"))?;
-
-    serve_docx_file(Path::new(&path), &document.original_filename)
-        .await
-        .map_err(|err| internal_error(err.into()))
 }
 
 fn spawn_job_worker(state: AppState, job_id: Uuid) {
@@ -1220,29 +1217,6 @@ fn sanitize_for_docx(original_name: &str) -> String {
     format!("{}_translated.docx", safe_stem)
 }
 
-async fn serve_docx_file(path: &Path, original_name: &str) -> Result<Response> {
-    let bytes = tokio_fs::read(path)
-        .await
-        .with_context(|| format!("failed to read file at {}", path.display()))?;
-
-    let filename = sanitize_for_docx(original_name);
-
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        header::HeaderValue::from_static(
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ),
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        header::HeaderValue::from_str(&format!(r#"attachment; filename="{}""#, filename))
-            .unwrap_or_else(|_| header::HeaderValue::from_static("attachment")),
-    );
-
-    Ok((headers, bytes).into_response())
-}
-
 async fn update_document_status(
     pool: &sqlx::PgPool,
     document_id: Uuid,
@@ -1269,12 +1243,6 @@ async fn update_job_status(pool: &sqlx::PgPool, job_id: Uuid, detail: Option<&st
         .await
         .context("failed to update job detail")?;
     Ok(())
-}
-
-async fn ensure_storage_root() -> Result<()> {
-    tokio_fs::create_dir_all(STORAGE_ROOT)
-        .await
-        .with_context(|| format!("failed to ensure storage root at {}", STORAGE_ROOT))
 }
 
 #[derive(sqlx::FromRow)]
@@ -1327,6 +1295,16 @@ struct DocumentDownloadRecord {
     files_purged_at: Option<DateTime<Utc>>,
     original_filename: String,
     translated_path: Option<String>,
+}
+
+impl JobAccess for DocumentDownloadRecord {
+    fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    fn files_purged_at(&self) -> Option<DateTime<Utc>> {
+        self.files_purged_at
+    }
 }
 
 #[derive(sqlx::FromRow)]

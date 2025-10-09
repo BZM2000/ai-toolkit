@@ -29,6 +29,7 @@ use zip::ZipArchive;
 mod admin;
 
 use crate::web::history_ui;
+use crate::web::storage::JobAccess;
 use crate::web::{
     FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
     UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
@@ -42,9 +43,9 @@ use crate::{
     render_footer,
     usage::{self, MODULE_SUMMARIZER},
     web::{
-        ApiMessage, JobSubmission,
+        AccessMessages, ApiMessage, JobSubmission,
         auth::{self, JsonAuthError},
-        json_error,
+        ensure_storage_root, json_error, require_path, verify_job_access,
     },
 };
 
@@ -296,7 +297,7 @@ async fn create_job(
     let mut document_type = DocumentKind::ResearchArticle;
     let mut translate = true;
 
-    ensure_storage_root()
+    ensure_storage_root(STORAGE_ROOT)
         .await
         .map_err(|err| internal_error(err.into()))?;
     let job_id = Uuid::new_v4();
@@ -473,52 +474,27 @@ async fn download_combined_output(
 
     let pool = state.pool();
 
-    let job = sqlx::query_as::<_, CombinedJobRecord>(
-        "SELECT user_id, combined_summary_path, combined_translation_path, files_purged_at FROM summary_jobs WHERE id = $1",
+    let job = verify_job_access(
+        || {
+            sqlx::query_as::<_, CombinedJobRecord>(
+                "SELECT user_id, combined_summary_path, combined_translation_path, files_purged_at FROM summary_jobs WHERE id = $1",
+            )
+            .bind(job_id)
+            .fetch_optional(&pool)
+        },
+        &user,
+        AccessMessages {
+            not_found: "未找到任务。",
+            forbidden: "您无权访问该任务。",
+            purged: "该任务的下载文件已过期并被清除。",
+        },
     )
-    .bind(job_id)
-    .fetch_optional(&pool)
-    .await
-    .map_err(|err| internal_error(err.into()))?
-    .ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ApiMessage::new("未找到任务。")),
-        )
-    })?;
-
-    if job.user_id != user.id && !user.is_admin {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiMessage::new("您无权访问该任务。")),
-        ));
-    }
-
-    if job.files_purged_at.is_some() {
-        return Err((
-            StatusCode::GONE,
-            Json(ApiMessage::new("该任务的下载文件已过期并被清除。")),
-        ));
-    }
+    .await?;
 
     let (path, suffix) = match variant.as_str() {
-        "summary" => job
-            .combined_summary_path
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ApiMessage::new("汇总摘要尚不可用。")),
-                )
-            })
+        "summary" => require_path(job.combined_summary_path.clone(), "汇总摘要尚不可用。")
             .map(|path| (path, "combined-summary"))?,
-        "translation" => job
-            .combined_translation_path
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ApiMessage::new("汇总译文尚不可用。")),
-                )
-            })
+        "translation" => require_path(job.combined_translation_path.clone(), "汇总译文尚不可用。")
             .map(|path| (path, "combined-translation"))?,
         _ => {
             return Err((
@@ -630,12 +606,6 @@ fn build_translation_request(model: &str, prompt: String, summary: &str) -> LlmR
             ),
         ],
     )
-}
-
-async fn ensure_storage_root() -> Result<()> {
-    tokio_fs::create_dir_all(STORAGE_ROOT)
-        .await
-        .with_context(|| format!("failed to ensure storage root at {}", STORAGE_ROOT))
 }
 
 fn extract_docx_text(path: &Path) -> Result<String> {
@@ -1316,6 +1286,16 @@ struct CombinedJobRecord {
     combined_summary_path: Option<String>,
     combined_translation_path: Option<String>,
     files_purged_at: Option<DateTime<Utc>>,
+}
+
+impl JobAccess for CombinedJobRecord {
+    fn user_id(&self) -> Uuid {
+        self.user_id
+    }
+
+    fn files_purged_at(&self) -> Option<DateTime<Utc>> {
+        self.files_purged_at
+    }
 }
 
 #[derive(Serialize)]
