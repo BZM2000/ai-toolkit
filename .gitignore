@@ -3,4 +3,6 @@
 .env
 storage/
 AGENTS.md
-CLAUDE.md
+.venv
+robots.txt
+test
