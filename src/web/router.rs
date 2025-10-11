@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    http::header,
+    http::{StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -17,6 +17,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(landing::landing_page))
         .route("/login", get(auth::login_page).post(auth::process_login))
         .route("/logout", post(auth::logout))
+        .route("/healthz", get(healthz))
         .route("/robots.txt", get(robots_txt))
         .route("/dashboard", get(admin::dashboard))
         .route("/dashboard/users", post(admin::create_user))
@@ -65,4 +66,8 @@ async fn robots_txt() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         ROBOTS_TXT_BODY,
     )
+}
+
+async fn healthz() -> impl IntoResponse {
+    StatusCode::OK
 }

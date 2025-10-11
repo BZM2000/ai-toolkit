@@ -21,8 +21,6 @@ CLAUDE.md
 # macOS
 .DS_Store
 
-# Railway
-railway.json
-
 # Logs
 *.log
+!robots.txt

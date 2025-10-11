@@ -25,6 +25,8 @@ use tracing_subscriber::EnvFilter;
 async fn main() {
     dotenv().ok();
     init_tracing();
+    println!("starting ai-toolkit service bootstrap");
+    info!("starting ai-toolkit service");
 
     if let Err(err) = app_main().await {
         error!(?err, "application error");
@@ -33,12 +35,19 @@ async fn main() {
 }
 
 async fn app_main() -> Result<()> {
+    println!("initialising application state");
+    info!("constructing application state");
     let state = AppState::new().await?;
+    println!("application state initialised");
+    info!("ensured application state is ready");
     state.ensure_seed_admin().await?;
+    info!("seed admin check complete");
 
     maintenance::spawn(state.clone());
+    info!("background maintenance tasks registered");
 
     let app = web::router::build_router(state);
+    info!("router built");
 
     let port: u16 = env::var("PORT")
         .ok()
@@ -61,6 +70,8 @@ fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
+        .with_ansi(false)
+        .with_writer(std::io::stdout)
         .compact()
         .init();
 }
