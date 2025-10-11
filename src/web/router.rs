@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use axum::extract::DefaultBodyLimit;
 
 use crate::{
     modules,
@@ -13,6 +14,10 @@ use crate::{
 const ROBOTS_TXT_BODY: &str = include_str!("../../robots.txt");
 
 pub fn build_router(state: AppState) -> Router {
+    // Set a higher body limit to accommodate large manuscript batches (500MB)
+    // Multi-file uploads (up to 100 docs) can easily exceed the 2MB default limit
+    let body_limit = 500 * 1024 * 1024; // 500MB in bytes
+
     Router::new()
         .route("/", get(landing::landing_page))
         .route("/login", get(auth::login_page).post(auth::process_login))
@@ -58,6 +63,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(modules::grader::router())
         .merge(modules::info_extract::router())
         .merge(modules::reviewer::router())
+        .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
 }
 

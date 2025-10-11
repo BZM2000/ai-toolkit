@@ -30,9 +30,9 @@ mod admin;
 
 use crate::web::history_ui;
 use crate::web::{
-    FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout, UPLOAD_WIDGET_SCRIPT,
-    UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form, render_tool_page,
-    render_upload_widget,
+    ensure_storage_root, FileFieldConfig, FileNaming, ToolAdminLink, ToolPageLayout,
+    UPLOAD_WIDGET_SCRIPT, UPLOAD_WIDGET_STYLES, UploadWidgetConfig, process_upload_form,
+    render_tool_page, render_upload_widget,
 };
 use crate::{
     AppState, JournalReferenceRow, JournalTopicRow, JournalTopicScoreRow, escape_html,
@@ -457,7 +457,7 @@ async fn create_job(
         return Err(json_error(StatusCode::FORBIDDEN, err.message()));
     }
 
-    ensure_storage_root()
+    ensure_storage_root(STORAGE_ROOT)
         .await
         .map_err(|err| internal_error(err.into()))?;
 
@@ -1270,11 +1270,6 @@ async fn mark_job_failed(
     Ok(())
 }
 
-async fn ensure_storage_root() -> Result<()> {
-    tokio_fs::create_dir_all(STORAGE_ROOT)
-        .await
-        .with_context(|| format!("failed to ensure storage root at {}", STORAGE_ROOT))
-}
 
 fn read_document_text(path: &Path) -> Result<String> {
     let extension = path

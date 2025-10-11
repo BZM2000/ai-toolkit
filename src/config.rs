@@ -446,8 +446,8 @@ fn default_info_extract_prompts() -> InfoExtractPrompts {
 
 fn default_grader_models() -> GraderModels {
     GraderModels {
-        grading_model: "openrouter/openai/gpt-5.0-mini".to_string(),
-        keyword_model: "openrouter/openai/gpt-5.0-mini".to_string(),
+        grading_model: "openrouter/openai/gpt-4o-mini".to_string(),
+        keyword_model: "openrouter/openai/gpt-4o-mini".to_string(),
     }
 }
 
@@ -468,8 +468,8 @@ fn default_reviewer_models() -> ReviewerModels {
         round1_model_6: "openrouter/mistralai/mistral-large-2".to_string(),
         round1_model_7: "openrouter/x-ai/grok-2".to_string(),
         round1_model_8: "openrouter/deepseek/deepseek-chat".to_string(),
-        round2_model: "openrouter/openai/gpt-5.0".to_string(),
-        round3_model: "openrouter/openai/gpt-5.0".to_string(),
+        round2_model: "openrouter/openai/gpt-4o".to_string(),
+        round3_model: "openrouter/openai/gpt-4o".to_string(),
     }
 }
 
